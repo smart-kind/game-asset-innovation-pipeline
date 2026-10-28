@@ -1,5 +1,0 @@
-/* Hide tooltips after touch input, where hover can get stuck. */
-.invokeai-touch-device [role='tooltip'] {
-  visibility: hidden !important;
-  opacity: 0 !important;
-}

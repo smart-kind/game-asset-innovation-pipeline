@@ -214,3 +214,9 @@ weblate.ini
 # node_modules/ (created by running a JS tool from the repo root) was not covered by anything,
 # so vitest cache artifacts could be committed by accident.
 node_modules/
+
+# 部署产物（体积大，走单独传输）
+docker/*.tar.gz
+
+# 运行时数据（SQLite 库/生成图/模型记录，体积大且机器相关）
+docker/invokeai-data/

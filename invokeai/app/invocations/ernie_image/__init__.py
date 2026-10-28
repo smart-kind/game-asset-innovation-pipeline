@@ -1,1 +1,0 @@
-"""Baidu ERNIE-Image nodes."""

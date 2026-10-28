@@ -1,0 +1,19 @@
+# 无源码部署：docker load invokeai-api-only.tar.gz 后，用本文件起容器
+# 不需要仓库、不需要 build
+services:
+  invokeai:
+    image: "invokeai-api-only"
+    env_file:
+      - .env
+    environment:
+      - INVOKEAI_ROOT=${CONTAINER_INVOKEAI_ROOT:-/invokeai}
+    ports:
+      - "${INVOKEAI_PORT:-9090}:${INVOKEAI_PORT:-9090}"
+    volumes:
+      - type: bind
+        source: ./invokeai-data
+        target: /invokeai
+        bind:
+          create_host_path: true
+    tty: true
+    stdin_open: true
