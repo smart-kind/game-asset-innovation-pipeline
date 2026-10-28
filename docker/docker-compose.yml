@@ -1,7 +1,10 @@
 # Copyright (c) 2023 Eugene Brodsky https://github.com/ebr
+#
+# API-only build: the external-provider image pipeline is pure HTTP, so no GPU
+# (CUDA/ROCm) profile is needed. A single CPU service runs the service.
 
 x-invokeai: &invokeai
-    image: "ghcr.io/invoke-ai/invokeai:latest"
+    image: "invokeai-api-only"
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -15,41 +18,18 @@ x-invokeai: &invokeai
     environment:
       # if set, CONTAINER_INVOKEAI_ROOT will override the Invoke runtime directory location *inside* the container
       - INVOKEAI_ROOT=${CONTAINER_INVOKEAI_ROOT:-/invokeai}
-      - HF_HOME
     ports:
       - "${INVOKEAI_PORT:-9090}:${INVOKEAI_PORT:-9090}"
     volumes:
       - type: bind
-        source: ${HOST_INVOKEAI_ROOT:-${INVOKEAI_ROOT:-~/invokeai}}
+        source: ${HOST_INVOKEAI_ROOT:-${INVOKEAI_ROOT:-./invokeai-data}}
         target: ${CONTAINER_INVOKEAI_ROOT:-/invokeai}
         bind:
           create_host_path: true
-      - ${HF_HOME:-~/.cache/huggingface}:${HF_HOME:-/invokeai/.cache/huggingface}
     tty: true
     stdin_open: true
 
 
 services:
-  invokeai-cuda:
+  invokeai:
     <<: *invokeai
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  invokeai-cpu:
-    <<: *invokeai
-    profiles:
-      - cpu
-
-  invokeai-rocm:
-    <<: *invokeai
-    environment:
-      - AMD_VISIBLE_DEVICES=all
-      - RENDER_GROUP_ID=${RENDER_GROUP_ID}
-    runtime: amd
-    profiles:
-      - rocm

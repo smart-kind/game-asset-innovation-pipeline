@@ -40,7 +40,12 @@ from shutil import rmtree
 from types import TracebackType
 from typing import Any, Callable, Iterable, Iterator, Optional
 
-import psutil
+try:
+    import psutil
+except ImportError:
+    # API-only build: psutil ships with the local-model stack and is absent here. Process
+    # liveness then cannot be inspected, and claim recovery errs toward preserving claims.
+    psutil = None  # type: ignore[assignment]
 
 from invokeai.app.services.download import RESUME_REFUSED_MESSAGE, DownloadJob
 from invokeai.app.services.model_install.model_install_common import (
@@ -119,10 +124,15 @@ def _publish_claim(root: Path) -> None:
     temp_path = Path(temp_name)
     try:
         with os.fdopen(fd, "wb") as f:
-            process = psutil.Process()
-            payload = f"{process.pid} {process.create_time()!r}"
-            if sys.platform == "linux":
-                payload += f" {_linux_process_start_identity(process.pid)}"
+            if psutil is not None:
+                process = psutil.Process()
+                payload = f"{process.pid} {process.create_time()!r}"
+                if sys.platform == "linux":
+                    payload += f" {_linux_process_start_identity(process.pid)}"
+            else:
+                # No psutil: record a legacy wall-clock payload. Recovery then cannot declare this
+                # claim stale by PID reuse, which is the conservative direction.
+                payload = f"{os.getpid()} {time.time()!r}"
             f.write(f"{payload}\n".encode("ascii"))
             f.flush()
             os.fsync(f.fileno())
@@ -723,6 +733,12 @@ class InstallStagingLedger:
                     if sys.platform != "linux" or not identity.startswith("linux:"):
                         record_diagnostic(claim_path, "its process identity is unsupported here; preserving it")
                         continue
+                if psutil is None:
+                    record_diagnostic(
+                        claim_path,
+                        "process liveness cannot be inspected in this build; preserving it",
+                    )
+                    continue
                 process = psutil.Process(pid)
                 if process.status() == psutil.STATUS_ZOMBIE:
                     stale = True

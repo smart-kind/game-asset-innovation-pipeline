@@ -15,13 +15,6 @@ RUN --mount=type=cache,target=/pnpm/store \
 COPY invokeai/version/invokeai_version.py /build/invokeai/version/
 RUN pnpm exec vite build
 
-FROM web-builder AS legacy-web-builder
-WORKDIR /legacy-build
-COPY invokeai/frontend/webv1/ ./
-RUN --mount=type=cache,target=/pnpm/store \
-    pnpm install --frozen-lockfile
-RUN pnpm exec vite build
-
 ## Backend ---------------------------------------
 
 FROM library/ubuntu:24.04
@@ -34,12 +27,8 @@ RUN --mount=type=cache,target=/var/cache/apt \
     ca-certificates \
     git \
     gosu \
-    libglib2.0-0 \
-    libgl1 \
-    libglx-mesa0 \
     build-essential \
-    libopencv-dev \
-    libstdc++-10-dev
+    libxcb1
 
 ENV \
     PYTHONUNBUFFERED=1 \
@@ -59,41 +48,24 @@ ENV \
     CONTAINER_UID=${CONTAINER_UID:-1000} \
     CONTAINER_GID=${CONTAINER_GID:-1000}
 
-ARG GPU_DRIVER=cuda
-
 # Install `uv` for package management
 COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /uvx /bin/
 
 # Install python & allow non-root user to use it by traversing the /root dir without read permissions
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv python install ${PYTHON_VERSION} && \
-    # chmod --recursive a+rX /root/.local/share/uv/python
     chmod 711 /root
 
 WORKDIR ${INVOKEAI_SRC}
 
-# Install project's dependencies as a separate layer so they aren't rebuilt every commit.
-# bind-mount instead of copy to defer adding sources to the image until next layer.
-#
-# NOTE: on arm64 (aarch64), torch/torchvision resolve to the PyPI CPU wheels (2.7.1) regardless of
-# GPU_DRIVER -- the pinned WHL-index pairs only apply on x86_64 (see pyproject.toml). Use GPU_DRIVER=cpu on arm64.
-# x86_64/CUDA is the default
+# API-only build: no GPU driver selection, no MySQL extra. The external-provider
+# image pipeline is pure HTTP; the slim pyproject carries no torch/diffusers stack.
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
-    # this is just to get the package manager to recognize that the project exists, without making changes to the docker layer
     --mount=type=bind,source=invokeai/version,target=invokeai/version \
     ulimit -n 30000 && \
-    uv sync --extra $GPU_DRIVER --extra mysql --frozen
-
-# Link amdgpu.ids for ROCm builds
-# contributed by https://github.com/Rubonnek
-RUN mkdir -p "/opt/amdgpu/share/libdrm" &&\
-    ln -s "/usr/share/libdrm/amdgpu.ids" "/opt/amdgpu/share/libdrm/amdgpu.ids" && groupadd render
-
-# build patchmatch
-RUN cd /usr/lib/$(uname -p)-linux-gnu/pkgconfig/ && ln -sf opencv4.pc opencv.pc
-RUN python -c "from patchmatch import patch_match"
+    uv sync --frozen
 
 RUN mkdir -p ${INVOKEAI_ROOT} && chown -R ${CONTAINER_UID}:${CONTAINER_GID} ${INVOKEAI_ROOT}
 
@@ -103,7 +75,6 @@ CMD ["invokeai-web"]
 
 # --link requires buldkit w/ dockerfile syntax 1.4, does not work with podman
 COPY --link --from=web-builder /build/invokeai/frontend/webv2/dist ${INVOKEAI_SRC}/invokeai/frontend/webv2/dist
-COPY --link --from=legacy-web-builder /legacy-build/dist ${INVOKEAI_SRC}/invokeai/frontend/webv1/dist
 
 # add sources last to minimize image changes on code changes
 COPY invokeai ${INVOKEAI_SRC}/invokeai
@@ -114,5 +85,4 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     ulimit -n 30000 && \
-    uv pip install -e .[$GPU_DRIVER,mysql]
-
+    uv pip install -e .

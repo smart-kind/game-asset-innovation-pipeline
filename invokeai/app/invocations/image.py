@@ -1,9 +1,7 @@
 from pathlib import Path
 from typing import Literal, Optional
 
-import cv2
 import numpy
-import torch
 from PIL import Image, ImageChops, ImageFilter, ImageOps
 
 from invokeai.app.invocations.baseinvocation import (
@@ -21,20 +19,10 @@ from invokeai.app.invocations.fields import (
     WithBoard,
     WithMetadata,
 )
-from invokeai.app.invocations.primitives import ImageOutput, StringOutput
+from invokeai.app.invocations.primitives import ImageOutput
 from invokeai.app.services.image_records.image_records_common import ImageCategory
 from invokeai.app.services.shared.invocation_context import InvocationContext
 from invokeai.app.util.misc import SEED_MAX
-from invokeai.backend.image_util.color_conversion import (
-    linear_srgb_from_oklab,
-    linear_srgb_from_oklch,
-    linear_srgb_from_srgb,
-    oklab_from_linear_srgb,
-    oklch_from_oklab,
-    srgb_from_linear_srgb,
-)
-from invokeai.backend.image_util.invisible_watermark import InvisibleWatermark
-from invokeai.backend.image_util.safety_checker import SafetyChecker
 
 
 def _extract_alpha_channel(image: Image.Image) -> Image.Image | None:
@@ -442,31 +430,42 @@ class OklabUnsharpMaskInvocation(BaseInvocation, WithMetadata, WithBoard):
     radius: float = InputField(gt=0, description="Unsharp mask radius", default=2)
     strength: float = InputField(ge=0, description="Unsharp mask strength", default=50)
 
-    def pil_from_tensor(self, tensor: torch.Tensor) -> Image.Image:
-        array = torch.clamp(tensor, 0.0, 1.0).permute(1, 2, 0).cpu().numpy()
-        return Image.fromarray((array * 255).astype("uint8"))
+    def pil_from_array(self, array: "numpy.ndarray") -> Image.Image:
+        """Convert an HWC float32 array in [0, 1] to a PIL image."""
+        return Image.fromarray((numpy.clip(array, 0.0, 1.0) * 255).astype("uint8"))
 
-    def tensor_from_pil(self, img: Image.Image) -> torch.Tensor:
-        return torch.from_numpy(numpy.array(img, dtype=numpy.float32) / 255.0).permute(2, 0, 1)
+    def array_from_pil(self, img: Image.Image) -> "numpy.ndarray":
+        """Convert a PIL image to an HWC float32 array in [0, 1]."""
+        return numpy.asarray(img.convert("RGB"), dtype=numpy.float32) / 255.0
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
+        from invokeai.backend.image_util.color_conversion import (
+            linear_srgb_from_oklab,
+            linear_srgb_from_srgb,
+            oklab_from_linear_srgb,
+            srgb_from_linear_srgb,
+        )
+
         image = context.images.get_pil(self.image.image_name)
         mode = image.mode
 
         alpha_channel = _extract_alpha_channel(image)
         image = image.convert("RGB")
 
-        image_blurred = self.tensor_from_pil(image.filter(ImageFilter.GaussianBlur(radius=self.radius)))
-        image_tensor = self.tensor_from_pil(image)
+        # color_conversion takes 3xHxW arrays; the pil<->array helpers speak HWC.
+        image_blurred = numpy.transpose(
+            self.array_from_pil(image.filter(ImageFilter.GaussianBlur(radius=self.radius))), (2, 0, 1)
+        )
+        image_array = numpy.transpose(self.array_from_pil(image), (2, 0, 1))
 
-        image_oklab = oklab_from_linear_srgb(linear_srgb_from_srgb(image_tensor))
+        image_oklab = oklab_from_linear_srgb(linear_srgb_from_srgb(image_array))
         image_blurred_oklab = oklab_from_linear_srgb(linear_srgb_from_srgb(image_blurred))
 
         image_oklab[0, ...] += (image_oklab[0, ...] - image_blurred_oklab[0, ...]) * (self.strength / 100.0)
-        image_oklab = torch.clamp(image_oklab, -1.0, 1.0)
+        image_oklab = numpy.clip(image_oklab, -1.0, 1.0)
 
         image = _restore_original_mode(
-            self.pil_from_tensor(srgb_from_linear_srgb(linear_srgb_from_oklab(image_oklab))),
+            self.pil_from_array(numpy.transpose(srgb_from_linear_srgb(linear_srgb_from_oklab(image_oklab)), (1, 2, 0))),
             mode,
             alpha_channel,
         )
@@ -615,70 +614,6 @@ class ImageInverseLerpInvocation(BaseInvocation, WithMetadata, WithBoard):
 
 
 @invocation(
-    "img_nsfw",
-    title="Blur NSFW Image",
-    tags=["image", "nsfw"],
-    category="image",
-    version="1.2.3",
-)
-class ImageNSFWBlurInvocation(BaseInvocation, WithMetadata, WithBoard):
-    """Add blur to NSFW-flagged images"""
-
-    image: ImageField = InputField(description="The image to check")
-
-    def invoke(self, context: InvocationContext) -> ImageOutput:
-        image = context.images.get_pil(self.image.image_name)
-
-        logger = context.logger
-        logger.debug("Running NSFW checker")
-        image = SafetyChecker.blur_if_nsfw(image)
-
-        image_dto = context.images.save(image=image)
-
-        return ImageOutput.build(image_dto)
-
-
-@invocation(
-    "img_watermark",
-    title="Add Invisible Watermark",
-    tags=["image", "watermark"],
-    category="image",
-    version="1.2.2",
-)
-class ImageWatermarkInvocation(BaseInvocation, WithMetadata, WithBoard):
-    """Add an invisible watermark to an image"""
-
-    image: ImageField = InputField(description="The image to check")
-    text: str = InputField(default="InvokeAI", description="Watermark text")
-
-    def invoke(self, context: InvocationContext) -> ImageOutput:
-        image = context.images.get_pil(self.image.image_name)
-        new_image = InvisibleWatermark.add_watermark(image, self.text)
-        image_dto = context.images.save(image=new_image)
-
-        return ImageOutput.build(image_dto)
-
-
-@invocation(
-    "decode_watermark",
-    title="Decode Invisible Watermark",
-    tags=["image", "watermark"],
-    category="image",
-    version="1.0.0",
-)
-class DecodeInvisibleWatermarkInvocation(BaseInvocation):
-    """Decode an invisible watermark from an image."""
-
-    image: ImageField = InputField(description="The image to decode the watermark from")
-    length: int = InputField(default=8, description="The expected watermark length in bytes")
-
-    def invoke(self, context: InvocationContext) -> StringOutput:
-        image = context.images.get_pil(self.image.image_name)
-        watermark = InvisibleWatermark.decode_watermark(image, self.length)
-        return StringOutput(value=watermark)
-
-
-@invocation(
     "mask_edge",
     title="Mask Edge",
     tags=["image", "mask", "inpaint"],
@@ -697,6 +632,8 @@ class MaskEdgeInvocation(BaseInvocation, WithMetadata, WithBoard):
     )
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
+        import cv2
+
         mask = context.images.get_pil(self.image.image_name).convert("L")
 
         npimg = numpy.asarray(mask, dtype=numpy.uint8)
@@ -894,6 +831,16 @@ class OklchImageHueAdjustmentInvocation(BaseInvocation, WithMetadata, WithBoard)
     hue: int = InputField(default=0, description="The degrees by which to rotate the hue, 0-360")
 
     def invoke(self, context: InvocationContext) -> ImageOutput:
+        import torch
+
+        from invokeai.backend.image_util.color_conversion import (
+            linear_srgb_from_oklch,
+            linear_srgb_from_srgb,
+            oklab_from_linear_srgb,
+            oklch_from_oklab,
+            srgb_from_linear_srgb,
+        )
+
         image = context.images.get_pil(self.image.image_name)
         mode = image.mode
         alpha_channel = _extract_alpha_channel(image)
@@ -1224,6 +1171,8 @@ class CanvasPasteBackInvocation(BaseInvocation, WithMetadata, WithBoard):
     mask_blur: int = InputField(default=0, ge=0, description="The amount to blur the mask by")
 
     def _prepare_mask(self, mask: Image.Image) -> Image.Image:
+        import cv2
+
         mask_array = numpy.array(mask)
         kernel = numpy.ones((self.mask_blur, self.mask_blur), numpy.uint8)
         dilated_mask_array = cv2.erode(mask_array, kernel, iterations=3)
@@ -1300,6 +1249,8 @@ class CanvasV2MaskAndCropInvocation(BaseInvocation, WithMetadata, WithBoard):
     mask_blur: int = InputField(default=0, ge=0, description="The amount to blur the mask by")
 
     def _prepare_mask(self, mask: Image.Image) -> Image.Image:
+        import cv2
+
         mask_array = numpy.array(mask)
         kernel = numpy.ones((self.mask_blur, self.mask_blur), numpy.uint8)
         dilated_mask_array = cv2.erode(mask_array, kernel, iterations=3)
@@ -1345,6 +1296,8 @@ class ExpandMaskWithFadeInvocation(BaseInvocation, WithMetadata, WithBoard):
             # If the fade size is 0, just return the mask as-is.
             image_dto = context.images.save(image=pil_mask, image_category=ImageCategory.MASK)
             return ImageOutput.build(image_dto)
+
+        import cv2
 
         np_mask = numpy.asarray(pil_mask)
 

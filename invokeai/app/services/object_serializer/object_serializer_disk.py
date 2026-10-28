@@ -4,7 +4,12 @@ import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, TypeVar
 
-import torch
+try:
+    import torch
+except ImportError:
+    # API-only build: torch was the serialization engine and is absent. The class stays
+    # importable so service wiring works; save/load raise with a clear error if anything uses it.
+    torch = None  # type: ignore[assignment]
 
 from invokeai.app.services.object_serializer.object_serializer_base import ObjectSerializerBase
 from invokeai.app.services.object_serializer.object_serializer_common import (
@@ -52,9 +57,14 @@ class ObjectSerializerDisk(ObjectSerializerBase[T]):
         self._output_dir = Path(self._tempdir.name) if self._tempdir else self._base_output_dir
         self.__obj_class_name: Optional[str] = None
 
-        torch.serialization.add_safe_globals(safe_globals) if safe_globals else None
+        if safe_globals:
+            if torch is None:
+                raise RuntimeError("safe globals require torch, which the API-only build does not install")
+            torch.serialization.add_safe_globals(safe_globals)
 
     def load(self, name: str) -> T:
+        if torch is None:
+            raise RuntimeError("object serialization requires torch, which the API-only build does not install")
         file_path = self._get_path(name)
         try:
             # `weights_only=True` is the default from torch 2.6 onwards, but pin it explicitly: these files are
@@ -64,6 +74,8 @@ class ObjectSerializerDisk(ObjectSerializerBase[T]):
             raise ObjectNotFoundError(name) from e
 
     def save(self, obj: T) -> str:
+        if torch is None:
+            raise RuntimeError("object serialization requires torch, which the API-only build does not install")
         name = self._new_name()
         file_path = self._get_path(name)
         torch.save(obj, file_path)  # pyright: ignore [reportUnknownMemberType]

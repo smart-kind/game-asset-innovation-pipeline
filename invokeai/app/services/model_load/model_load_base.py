@@ -2,12 +2,14 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Optional
 
 from invokeai.backend.model_manager.configs.factory import AnyModelConfig
-from invokeai.backend.model_manager.load import LoadedModel, LoadedModelWithoutConfig
-from invokeai.backend.model_manager.load.model_cache.model_cache import ModelCache
-from invokeai.backend.model_manager.taxonomy import AnyModel, SubModelType
+from invokeai.backend.model_manager.taxonomy import SubModelType
+
+if TYPE_CHECKING:
+    from invokeai.backend.model_manager.load import LoadedModel, LoadedModelWithoutConfig
+    from invokeai.backend.model_manager.load.model_cache.model_cache import ModelCache
 
 
 class ModelLoadServiceBase(ABC):
@@ -19,7 +21,7 @@ class ModelLoadServiceBase(ABC):
         model_config: AnyModelConfig,
         submodel_type: Optional[SubModelType] = None,
         user_id: Optional[str] = None,
-    ) -> LoadedModel:
+    ) -> "LoadedModel":
         """
         Given a model's configuration, load it and return the LoadedModel object.
 
@@ -55,7 +57,7 @@ class ModelLoadServiceBase(ABC):
 
     @property
     @abstractmethod
-    def ram_cache(self) -> ModelCache:
+    def ram_cache(self) -> "ModelCache":
         """Return the RAM cache for the current thread's execution device.
 
         In multi-GPU mode, each session-processor worker is pinned to a device and gets its own
@@ -65,7 +67,7 @@ class ModelLoadServiceBase(ABC):
 
     @property
     @abstractmethod
-    def ram_caches(self) -> dict[str, ModelCache]:
+    def ram_caches(self) -> dict[str, "ModelCache"]:
         """Return all per-device RAM caches, keyed by normalized device string.
 
         Use this for maintenance operations that must apply to every device (clear cache, drop a
@@ -74,8 +76,8 @@ class ModelLoadServiceBase(ABC):
 
     @abstractmethod
     def load_model_from_path(
-        self, model_path: Path, loader: Optional[Callable[[Path], AnyModel]] = None
-    ) -> LoadedModelWithoutConfig:
+        self, model_path: Path, loader: Optional[Callable[[Path], Any]] = None
+    ) -> "LoadedModelWithoutConfig":
         """
         Load the model file or directory located at the indicated Path.
 

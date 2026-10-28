@@ -20,10 +20,9 @@ from logging import Logger
 from pathlib import Path
 from typing import Any
 
-from safetensors import safe_open
-
 from invokeai.app.services.config.config_default import InvokeAIAppConfig
 from invokeai.app.services.shared.sqlite_migrator.sqlite_migrator_common import Migration
+from invokeai.backend.model_manager.model_on_disk import read_safetensors_header
 from invokeai.backend.model_manager.taxonomy import AnimaVariantType, BaseModelType, ModelFormat, ModelType
 
 # Kept literal rather than imported from the config module: a migration must keep meaning what it
@@ -32,8 +31,8 @@ _CONNECTOR_SEGMENT = "anima_v2_connector."
 
 
 def _bundles_semantic_connector(path: Path) -> bool:
-    with safe_open(path, framework="pt", device="cpu") as checkpoint:
-        return any(key.startswith(_CONNECTOR_SEGMENT) or f".{_CONNECTOR_SEGMENT}" in key for key in checkpoint.keys())
+    header = read_safetensors_header(path)
+    return any(key.startswith(_CONNECTOR_SEGMENT) or f".{_CONNECTOR_SEGMENT}" in key for key in header)
 
 
 class AddAnimaVariantCallback:

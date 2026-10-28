@@ -1,8 +1,8 @@
 from math import pi as PI
 
-import torch
+import numpy as np
 
-MAX_FLOAT = torch.finfo(torch.tensor(1.0).dtype).max
+MAX_FLOAT = np.finfo(np.float32).max
 _SRGB_TO_LINEAR_THRESHOLD = 0.0404482362771082
 _LINEAR_TO_SRGB_THRESHOLD = 0.0031308
 _SRGB_TO_XYZ_D65_MATRIX = (
@@ -51,10 +51,10 @@ _LMS_TO_LINEAR_SRGB_MATRIX = (
 )
 
 
-def _require_color_tensor(color_tensor: torch.Tensor) -> torch.Tensor:
-    if color_tensor.ndim != 3 or color_tensor.shape[0] != 3:
-        raise ValueError("color_tensor must be a 3xHxW tensor")
-    return color_tensor
+def _require_color_array(color_array: np.ndarray) -> np.ndarray:
+    if color_array.ndim != 3 or color_array.shape[0] != 3:
+        raise ValueError("color_array must be a 3xHxW array")
+    return color_array
 
 
 def _require_reference_illuminant(reference_illuminant: str) -> str:
@@ -64,1021 +64,805 @@ def _require_reference_illuminant(reference_illuminant: str) -> str:
     return normalized
 
 
-def _full_like_spatial(reference_tensor: torch.Tensor, fill_value: float) -> torch.Tensor:
-    return torch.full(
-        reference_tensor.shape[1:], fill_value, dtype=reference_tensor.dtype, device=reference_tensor.device
-    )
+def _full_like_spatial(reference_array: np.ndarray, fill_value: float) -> np.ndarray:
+    return np.full(reference_array.shape[1:], fill_value, dtype=reference_array.dtype)
 
 
-def _degrees_from_unit_hue(unit_hue_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.remainder(unit_hue_tensor * 360.0, 360.0)
+def _degrees_from_unit_hue(unit_hue_array: np.ndarray) -> np.ndarray:
+    return np.remainder(unit_hue_array * 360.0, 360.0)
 
 
-def _unit_hue_from_degrees(hue_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.remainder(hue_tensor, 360.0) / 360.0
+def _unit_hue_from_degrees(hue_array: np.ndarray) -> np.ndarray:
+    return np.remainder(hue_array, 360.0) / 360.0
 
 
-def _matrix_tensor(matrix: tuple[tuple[float, ...], ...], reference_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.tensor(matrix, dtype=reference_tensor.dtype, device=reference_tensor.device)
+def _matrix_tensor(matrix: tuple[tuple[float, ...], ...], reference_array: np.ndarray) -> np.ndarray:
+    return np.array(matrix, dtype=reference_array.dtype)
 
 
-def _apply_matrix(matrix: tuple[tuple[float, ...], ...], color_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.einsum("rc,cwh->rwh", _matrix_tensor(matrix, color_tensor), color_tensor)
+def _apply_matrix(matrix: tuple[tuple[float, ...], ...], color_array: np.ndarray) -> np.ndarray:
+    return np.einsum("rc,cwh->rwh", _matrix_tensor(matrix, color_array), color_array)
 
 
-def _reference_white_tensor(reference_illuminant: str, reference_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.tensor(
-        _REFERENCE_ILLUMINANTS[reference_illuminant], dtype=reference_tensor.dtype, device=reference_tensor.device
-    ).view(3, 1, 1)
+def _reference_white_tensor(reference_illuminant: str, reference_array: np.ndarray) -> np.ndarray:
+    return np.array(_REFERENCE_ILLUMINANTS[reference_illuminant], dtype=reference_array.dtype).reshape(3, 1, 1)
 
 
-def _adapt_xyz(xyz_tensor: torch.Tensor, source_illuminant: str, target_illuminant: str) -> torch.Tensor:
-    xyz_tensor = _require_color_tensor(xyz_tensor)
+def _adapt_xyz(xyz_array: np.ndarray, source_illuminant: str, target_illuminant: str) -> np.ndarray:
+    xyz_array = _require_color_array(xyz_array)
     source_illuminant = _require_reference_illuminant(source_illuminant)
     target_illuminant = _require_reference_illuminant(target_illuminant)
     if source_illuminant == target_illuminant:
-        return xyz_tensor
-    source_white_lms = _apply_matrix(_BRADFORD_MATRIX, _reference_white_tensor(source_illuminant, xyz_tensor))
-    target_white_lms = _apply_matrix(_BRADFORD_MATRIX, _reference_white_tensor(target_illuminant, xyz_tensor))
-    xyz_lms = _apply_matrix(_BRADFORD_MATRIX, xyz_tensor)
+        return xyz_array
+    source_white_lms = _apply_matrix(_BRADFORD_MATRIX, _reference_white_tensor(source_illuminant, xyz_array))
+    target_white_lms = _apply_matrix(_BRADFORD_MATRIX, _reference_white_tensor(target_illuminant, xyz_array))
+    xyz_lms = _apply_matrix(_BRADFORD_MATRIX, xyz_array)
     adapted_lms = xyz_lms * (target_white_lms / source_white_lms)
     return _apply_matrix(_BRADFORD_INVERSE_MATRIX, adapted_lms)
 
 
-def srgb_from_linear_srgb(linear_srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW linear-light sRGB tensor in [0, 1] to gamma-corrected sRGB."""
+def srgb_from_linear_srgb(linear_srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW linear-light sRGB array in [0, 1] to gamma-corrected sRGB."""
 
-    linear_srgb_tensor = _require_color_tensor(linear_srgb_tensor)
-    linear_srgb_tensor = linear_srgb_tensor.clamp(0.0, 1.0)
-    return torch.where(
-        linear_srgb_tensor <= _LINEAR_TO_SRGB_THRESHOLD,
-        linear_srgb_tensor * 12.92,
-        1.055 * torch.pow(linear_srgb_tensor, 1.0 / 2.4) - 0.055,
+    linear_srgb_array = _require_color_array(linear_srgb_array)
+    linear_srgb_array = np.clip(linear_srgb_array, 0.0, 1.0)
+    return np.where(
+        linear_srgb_array <= _LINEAR_TO_SRGB_THRESHOLD,
+        linear_srgb_array * 12.92,
+        1.055 * np.power(linear_srgb_array, 1.0 / 2.4) - 0.055,
     )
 
 
-def linear_srgb_from_srgb(srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor in [0, 1] to linear-light sRGB."""
+def linear_srgb_from_srgb(srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array in [0, 1] to linear-light sRGB."""
 
-    srgb_tensor = _require_color_tensor(srgb_tensor)
-    return torch.where(
-        srgb_tensor <= _SRGB_TO_LINEAR_THRESHOLD,
-        srgb_tensor / 12.92,
-        torch.pow((srgb_tensor + 0.055) / 1.055, 2.4),
+    srgb_array = _require_color_array(srgb_array)
+    return np.where(
+        srgb_array <= _SRGB_TO_LINEAR_THRESHOLD,
+        srgb_array / 12.92,
+        np.power((srgb_array + 0.055) / 1.055, 2.4),
     )
 
 
-def xyz_from_linear_srgb(linear_srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW linear-light sRGB tensor to normalized XYZ, where D65 white is approximately 1.0."""
+def xyz_from_linear_srgb(linear_srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW linear-light sRGB array to normalized XYZ, where D65 white is approximately 1.0."""
 
-    linear_srgb_tensor = _require_color_tensor(linear_srgb_tensor)
-    return _apply_matrix(_SRGB_TO_XYZ_D65_MATRIX, linear_srgb_tensor)
-
-
-def linear_srgb_from_xyz(xyz_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW normalized XYZ tensor, where D65 white is approximately 1.0, to linear-light sRGB."""
-
-    xyz_tensor = _require_color_tensor(xyz_tensor)
-    return _apply_matrix(_XYZ_D65_TO_SRGB_MATRIX, xyz_tensor)
+    linear_srgb_array = _require_color_array(linear_srgb_array)
+    return _apply_matrix(_SRGB_TO_XYZ_D65_MATRIX, linear_srgb_array)
 
 
-def xyz_from_srgb(srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor to normalized XYZ, where D65 white is approximately 1.0."""
+def linear_srgb_from_xyz(xyz_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW normalized XYZ array, where D65 white is approximately 1.0, to linear-light sRGB."""
 
-    srgb_tensor = _require_color_tensor(srgb_tensor)
-    return xyz_from_linear_srgb(linear_srgb_from_srgb(srgb_tensor))
-
-
-def srgb_from_xyz(xyz_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW normalized XYZ tensor, where D65 white is approximately 1.0, to gamma-corrected sRGB."""
-
-    xyz_tensor = _require_color_tensor(xyz_tensor)
-    return srgb_from_linear_srgb(linear_srgb_from_xyz(xyz_tensor))
+    xyz_array = _require_color_array(xyz_array)
+    return _apply_matrix(_XYZ_D65_TO_SRGB_MATRIX, xyz_array)
 
 
-def xyz_d65_to_d50(xyz_tensor: torch.Tensor) -> torch.Tensor:
-    """Adapt a 3xHxW normalized XYZ tensor from D65 to D50 using Bradford chromatic adaptation."""
+def xyz_from_srgb(srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array to normalized XYZ, where D65 white is approximately 1.0."""
 
-    return _adapt_xyz(xyz_tensor, source_illuminant="D65", target_illuminant="D50")
-
-
-def xyz_d50_to_d65(xyz_tensor: torch.Tensor) -> torch.Tensor:
-    """Adapt a 3xHxW normalized XYZ tensor from D50 to D65 using Bradford chromatic adaptation."""
-
-    return _adapt_xyz(xyz_tensor, source_illuminant="D50", target_illuminant="D65")
+    srgb_array = _require_color_array(srgb_array)
+    return xyz_from_linear_srgb(linear_srgb_from_srgb(srgb_array))
 
 
-def _lab_from_xyz_helper(channel_illuminant_quotient_tensor: torch.Tensor) -> torch.Tensor:
+def srgb_from_xyz(xyz_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW normalized XYZ array, where D65 white is approximately 1.0, to gamma-corrected sRGB."""
+
+    xyz_array = _require_color_array(xyz_array)
+    return srgb_from_linear_srgb(linear_srgb_from_xyz(xyz_array))
+
+
+def xyz_d65_to_d50(xyz_array: np.ndarray) -> np.ndarray:
+    """Adapt a 3xHxW normalized XYZ array from D65 to D50 using Bradford chromatic adaptation."""
+
+    return _adapt_xyz(xyz_array, source_illuminant="D65", target_illuminant="D50")
+
+
+def xyz_d50_to_d65(xyz_array: np.ndarray) -> np.ndarray:
+    """Adapt a 3xHxW normalized XYZ array from D50 to D65 using Bradford chromatic adaptation."""
+
+    return _adapt_xyz(xyz_array, source_illuminant="D50", target_illuminant="D65")
+
+
+def _lab_from_xyz_helper(channel_illuminant_quotient_array: np.ndarray) -> np.ndarray:
     delta = 6.0 / 29.0
-    return torch.where(
-        torch.gt(channel_illuminant_quotient_tensor, delta**3.0),
-        torch.pow(channel_illuminant_quotient_tensor, 1.0 / 3.0),
-        torch.add(torch.div(channel_illuminant_quotient_tensor, 3.0 * (delta**2.0)), 4.0 / 29.0),
+    return np.where(
+        channel_illuminant_quotient_array > delta**3.0,
+        np.power(channel_illuminant_quotient_array, 1.0 / 3.0),
+        channel_illuminant_quotient_array / (3.0 * (delta**2.0)) + 4.0 / 29.0,
     )
 
 
-def _xyz_from_lab_helper(channel_tensor: torch.Tensor) -> torch.Tensor:
+def _xyz_from_lab_helper(channel_array: np.ndarray) -> np.ndarray:
     delta = 6.0 / 29.0
-    return torch.where(
-        torch.gt(channel_tensor, delta),
-        torch.pow(channel_tensor, 3.0),
-        torch.mul(3.0 * (delta**2.0), torch.sub(channel_tensor, 4.0 / 29.0)),
+    return np.where(
+        channel_array > delta,
+        np.power(channel_array, 3.0),
+        3.0 * (delta**2.0) * (channel_array - 4.0 / 29.0),
     )
 
 
-def lab_from_xyz(xyz_tensor: torch.Tensor, reference_illuminant: str = "D65") -> torch.Tensor:
-    """Convert a 3xHxW normalized XYZ tensor to CIELAB using the given reference illuminant."""
+def lab_from_xyz(xyz_array: np.ndarray, reference_illuminant: str = "D65") -> np.ndarray:
+    """Convert a 3xHxW normalized XYZ array to CIELAB using the given reference illuminant."""
 
-    xyz_tensor = _require_color_tensor(xyz_tensor)
+    xyz_array = _require_color_array(xyz_array)
     reference_illuminant = _require_reference_illuminant(reference_illuminant)
-    illuminant = _reference_white_tensor(reference_illuminant, xyz_tensor)
-    l_tensor = torch.sub(torch.mul(_lab_from_xyz_helper(torch.div(xyz_tensor[1, :, :], illuminant[1])), 116.0), 16.0)
-    a_tensor = torch.mul(
-        torch.sub(
-            _lab_from_xyz_helper(torch.div(xyz_tensor[0, :, :], illuminant[0])),
-            _lab_from_xyz_helper(torch.div(xyz_tensor[1, :, :], illuminant[1])),
-        ),
-        500.0,
-    )
-    b_tensor = torch.mul(
-        torch.sub(
-            _lab_from_xyz_helper(torch.div(xyz_tensor[1, :, :], illuminant[1])),
-            _lab_from_xyz_helper(torch.div(xyz_tensor[2, :, :], illuminant[2])),
-        ),
-        200.0,
-    )
-    return torch.stack([l_tensor, a_tensor, b_tensor])
+    illuminant = _reference_white_tensor(reference_illuminant, xyz_array)
+    l_array = _lab_from_xyz_helper(xyz_array[1, :, :] / illuminant[1]) * 116.0 - 16.0
+    a_array = (
+        _lab_from_xyz_helper(xyz_array[0, :, :] / illuminant[0])
+        - _lab_from_xyz_helper(xyz_array[1, :, :] / illuminant[1])
+    ) * 500.0
+    b_array = (
+        _lab_from_xyz_helper(xyz_array[1, :, :] / illuminant[1])
+        - _lab_from_xyz_helper(xyz_array[2, :, :] / illuminant[2])
+    ) * 200.0
+    return np.stack([l_array, a_array, b_array])
 
 
-def xyz_from_lab(lab_tensor: torch.Tensor, reference_illuminant: str = "D65") -> torch.Tensor:
-    """Convert a 3xHxW CIELAB tensor to normalized XYZ using the given reference illuminant."""
+def xyz_from_lab(lab_array: np.ndarray, reference_illuminant: str = "D65") -> np.ndarray:
+    """Convert a 3xHxW CIELAB array to normalized XYZ using the given reference illuminant."""
 
-    lab_tensor = _require_color_tensor(lab_tensor)
+    lab_array = _require_color_array(lab_array)
     reference_illuminant = _require_reference_illuminant(reference_illuminant)
-    illuminant = _reference_white_tensor(reference_illuminant, lab_tensor)
-    fy_tensor = (lab_tensor[0, :, :] + 16.0) / 116.0
-    fx_tensor = fy_tensor + (lab_tensor[1, :, :] / 500.0)
-    fz_tensor = fy_tensor - (lab_tensor[2, :, :] / 200.0)
-    return torch.stack(
+    illuminant = _reference_white_tensor(reference_illuminant, lab_array)
+    fy_array = (lab_array[0, :, :] + 16.0) / 116.0
+    fx_array = fy_array + (lab_array[1, :, :] / 500.0)
+    fz_array = fy_array - (lab_array[2, :, :] / 200.0)
+    return np.stack(
         [
-            illuminant[0] * _xyz_from_lab_helper(fx_tensor),
-            illuminant[1] * _xyz_from_lab_helper(fy_tensor),
-            illuminant[2] * _xyz_from_lab_helper(fz_tensor),
+            illuminant[0] * _xyz_from_lab_helper(fx_array),
+            illuminant[1] * _xyz_from_lab_helper(fy_array),
+            illuminant[2] * _xyz_from_lab_helper(fz_array),
         ]
     )
 
 
-def lab_from_linear_srgb(linear_srgb_tensor: torch.Tensor, reference_illuminant: str = "D65") -> torch.Tensor:
-    """Convert a 3xHxW linear-light sRGB tensor to CIELAB using the given reference illuminant."""
+def lab_from_linear_srgb(linear_srgb_array: np.ndarray, reference_illuminant: str = "D65") -> np.ndarray:
+    """Convert a 3xHxW linear-light sRGB array to CIELAB using the given reference illuminant."""
 
-    linear_srgb_tensor = _require_color_tensor(linear_srgb_tensor)
+    linear_srgb_array = _require_color_array(linear_srgb_array)
     reference_illuminant = _require_reference_illuminant(reference_illuminant)
-    xyz_tensor = xyz_from_linear_srgb(linear_srgb_tensor)
+    xyz_array = xyz_from_linear_srgb(linear_srgb_array)
     if reference_illuminant != "D65":
-        xyz_tensor = _adapt_xyz(xyz_tensor, source_illuminant="D65", target_illuminant=reference_illuminant)
-    return lab_from_xyz(xyz_tensor, reference_illuminant=reference_illuminant)
+        xyz_array = _adapt_xyz(xyz_array, source_illuminant="D65", target_illuminant=reference_illuminant)
+    return lab_from_xyz(xyz_array, reference_illuminant=reference_illuminant)
 
 
-def linear_srgb_from_lab(lab_tensor: torch.Tensor, reference_illuminant: str = "D65") -> torch.Tensor:
-    """Convert a 3xHxW CIELAB tensor to linear-light sRGB using the given reference illuminant."""
+def linear_srgb_from_lab(lab_array: np.ndarray, reference_illuminant: str = "D65") -> np.ndarray:
+    """Convert a 3xHxW CIELAB array to linear-light sRGB using the given reference illuminant."""
 
-    lab_tensor = _require_color_tensor(lab_tensor)
+    lab_array = _require_color_array(lab_array)
     reference_illuminant = _require_reference_illuminant(reference_illuminant)
-    xyz_tensor = xyz_from_lab(lab_tensor, reference_illuminant=reference_illuminant)
+    xyz_array = xyz_from_lab(lab_array, reference_illuminant=reference_illuminant)
     if reference_illuminant != "D65":
-        xyz_tensor = _adapt_xyz(xyz_tensor, source_illuminant=reference_illuminant, target_illuminant="D65")
-    return linear_srgb_from_xyz(xyz_tensor)
+        xyz_array = _adapt_xyz(xyz_array, source_illuminant=reference_illuminant, target_illuminant="D65")
+    return linear_srgb_from_xyz(xyz_array)
 
 
-def lab_from_srgb(srgb_tensor: torch.Tensor, reference_illuminant: str = "D65") -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor to CIELAB using the given reference illuminant."""
+def lab_from_srgb(srgb_array: np.ndarray, reference_illuminant: str = "D65") -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array to CIELAB using the given reference illuminant."""
 
-    srgb_tensor = _require_color_tensor(srgb_tensor)
-    return lab_from_linear_srgb(linear_srgb_from_srgb(srgb_tensor), reference_illuminant=reference_illuminant)
-
-
-def srgb_from_lab(lab_tensor: torch.Tensor, reference_illuminant: str = "D65") -> torch.Tensor:
-    """Convert a 3xHxW CIELAB tensor to gamma-corrected sRGB using the given reference illuminant."""
-
-    lab_tensor = _require_color_tensor(lab_tensor)
-    return srgb_from_linear_srgb(linear_srgb_from_lab(lab_tensor, reference_illuminant=reference_illuminant))
+    srgb_array = _require_color_array(srgb_array)
+    return lab_from_linear_srgb(linear_srgb_from_srgb(srgb_array), reference_illuminant=reference_illuminant)
 
 
-def oklab_from_linear_srgb(linear_srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW linear-light sRGB tensor to Oklab."""
+def srgb_from_lab(lab_array: np.ndarray, reference_illuminant: str = "D65") -> np.ndarray:
+    """Convert a 3xHxW CIELAB array to gamma-corrected sRGB using the given reference illuminant."""
 
-    linear_srgb_tensor = _require_color_tensor(linear_srgb_tensor)
-    lms_tensor = _apply_matrix(_LINEAR_SRGB_TO_OKLAB_LMS_MATRIX, linear_srgb_tensor)
-    lms_cbrt_tensor = torch.sign(lms_tensor) * torch.pow(torch.abs(lms_tensor), 1.0 / 3.0)
-    return _apply_matrix(_LMS_CUBE_ROOT_TO_OKLAB_MATRIX, lms_cbrt_tensor)
+    lab_array = _require_color_array(lab_array)
+    return srgb_from_linear_srgb(linear_srgb_from_lab(lab_array, reference_illuminant=reference_illuminant))
 
 
-def linear_srgb_from_oklab(oklab_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklab tensor to linear-light sRGB."""
+def oklab_from_linear_srgb(linear_srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW linear-light sRGB array to Oklab."""
 
-    oklab_tensor = _require_color_tensor(oklab_tensor)
-    lms_cbrt_tensor = _apply_matrix(_OKLAB_TO_LMS_CUBE_ROOT_MATRIX, oklab_tensor)
-    lms_tensor = lms_cbrt_tensor**3
-    return _apply_matrix(_LMS_TO_LINEAR_SRGB_MATRIX, lms_tensor)
-
-
-def oklab_from_srgb(srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor to Oklab."""
-
-    srgb_tensor = _require_color_tensor(srgb_tensor)
-    return oklab_from_linear_srgb(linear_srgb_from_srgb(srgb_tensor))
+    linear_srgb_array = _require_color_array(linear_srgb_array)
+    lms_array = _apply_matrix(_LINEAR_SRGB_TO_OKLAB_LMS_MATRIX, linear_srgb_array)
+    lms_cbrt_array = np.sign(lms_array) * np.power(np.abs(lms_array), 1.0 / 3.0)
+    return _apply_matrix(_LMS_CUBE_ROOT_TO_OKLAB_MATRIX, lms_cbrt_array)
 
 
-def srgb_from_oklab(oklab_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklab tensor to gamma-corrected sRGB."""
+def linear_srgb_from_oklab(oklab_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklab array to linear-light sRGB."""
 
-    oklab_tensor = _require_color_tensor(oklab_tensor)
-    return srgb_from_linear_srgb(linear_srgb_from_oklab(oklab_tensor))
-
-
-def oklab_from_xyz(xyz_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW normalized XYZ tensor, where D65 white is approximately 1.0, to Oklab."""
-
-    xyz_tensor = _require_color_tensor(xyz_tensor)
-    return oklab_from_linear_srgb(linear_srgb_from_xyz(xyz_tensor))
+    oklab_array = _require_color_array(oklab_array)
+    lms_cbrt_array = _apply_matrix(_OKLAB_TO_LMS_CUBE_ROOT_MATRIX, oklab_array)
+    lms_array = lms_cbrt_array**3
+    return _apply_matrix(_LMS_TO_LINEAR_SRGB_MATRIX, lms_array)
 
 
-def xyz_from_oklab(oklab_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklab tensor to normalized XYZ, where D65 white is approximately 1.0."""
+def oklab_from_srgb(srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array to Oklab."""
 
-    oklab_tensor = _require_color_tensor(oklab_tensor)
-    return xyz_from_linear_srgb(linear_srgb_from_oklab(oklab_tensor))
-
-
-def oklch_from_oklab(oklab_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklab tensor to Oklch, with hue in degrees."""
-
-    oklab_tensor = _require_color_tensor(oklab_tensor)
-    lightness = oklab_tensor[0, ...]
-    chroma = torch.sqrt(oklab_tensor[1, ...] ** 2 + oklab_tensor[2, ...] ** 2)
-    hue = torch.remainder(torch.rad2deg(torch.atan2(oklab_tensor[2, ...], oklab_tensor[1, ...])), 360.0)
-    return torch.stack([lightness, chroma, hue])
+    srgb_array = _require_color_array(srgb_array)
+    return oklab_from_linear_srgb(linear_srgb_from_srgb(srgb_array))
 
 
-def oklab_from_oklch(oklch_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklch tensor, with hue in degrees, to Oklab."""
+def srgb_from_oklab(oklab_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklab array to gamma-corrected sRGB."""
 
-    oklch_tensor = _require_color_tensor(oklch_tensor)
-    hue_radians = torch.deg2rad(oklch_tensor[2, ...])
-    a_channel = oklch_tensor[1, ...] * torch.cos(hue_radians)
-    b_channel = oklch_tensor[1, ...] * torch.sin(hue_radians)
-    return torch.stack([oklch_tensor[0, ...], a_channel, b_channel])
+    oklab_array = _require_color_array(oklab_array)
+    return srgb_from_linear_srgb(linear_srgb_from_oklab(oklab_array))
 
 
-def linear_srgb_from_oklch(oklch_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklch tensor directly to linear-light sRGB."""
+def oklab_from_xyz(xyz_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW normalized XYZ array, where D65 white is approximately 1.0, to Oklab."""
 
-    oklch_tensor = _require_color_tensor(oklch_tensor)
-    return linear_srgb_from_oklab(oklab_from_oklch(oklch_tensor))
-
-
-def oklch_from_linear_srgb(linear_srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW linear-light sRGB tensor directly to Oklch."""
-
-    linear_srgb_tensor = _require_color_tensor(linear_srgb_tensor)
-    return oklch_from_oklab(oklab_from_linear_srgb(linear_srgb_tensor))
+    xyz_array = _require_color_array(xyz_array)
+    return oklab_from_linear_srgb(linear_srgb_from_xyz(xyz_array))
 
 
-def oklch_from_srgb(srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor directly to Oklch."""
+def xyz_from_oklab(oklab_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklab array to normalized XYZ, where D65 white is approximately 1.0."""
 
-    srgb_tensor = _require_color_tensor(srgb_tensor)
-    return oklch_from_linear_srgb(linear_srgb_from_srgb(srgb_tensor))
-
-
-def srgb_from_oklch(oklch_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklch tensor directly to gamma-corrected sRGB."""
-
-    oklch_tensor = _require_color_tensor(oklch_tensor)
-    return srgb_from_linear_srgb(linear_srgb_from_oklch(oklch_tensor))
+    oklab_array = _require_color_array(oklab_array)
+    return xyz_from_linear_srgb(linear_srgb_from_oklab(oklab_array))
 
 
-def oklch_from_xyz(xyz_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW normalized XYZ tensor, where D65 white is approximately 1.0, to Oklch."""
+def oklch_from_oklab(oklab_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklab array to Oklch, with hue in degrees."""
 
-    xyz_tensor = _require_color_tensor(xyz_tensor)
-    return oklch_from_oklab(oklab_from_xyz(xyz_tensor))
-
-
-def xyz_from_oklch(oklch_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW Oklch tensor to normalized XYZ, where D65 white is approximately 1.0."""
-
-    oklch_tensor = _require_color_tensor(oklch_tensor)
-    return xyz_from_oklab(oklab_from_oklch(oklch_tensor))
+    oklab_array = _require_color_array(oklab_array)
+    lightness = oklab_array[0, ...]
+    chroma = np.sqrt(oklab_array[1, ...] ** 2 + oklab_array[2, ...] ** 2)
+    hue = np.remainder(np.rad2deg(np.arctan2(oklab_array[2, ...], oklab_array[1, ...])), 360.0)
+    return np.stack([lightness, chroma, hue])
 
 
-def _max_srgb_saturation_tensor(units_ab_tensor: torch.Tensor, steps: int = 1) -> torch.Tensor:
-    rgb_k_matrix = torch.tensor(
+def oklab_from_oklch(oklch_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklch array, with hue in degrees, to Oklab."""
+
+    oklch_array = _require_color_array(oklch_array)
+    hue_radians = np.deg2rad(oklch_array[2, ...])
+    a_channel = oklch_array[1, ...] * np.cos(hue_radians)
+    b_channel = oklch_array[1, ...] * np.sin(hue_radians)
+    return np.stack([oklch_array[0, ...], a_channel, b_channel])
+
+
+def linear_srgb_from_oklch(oklch_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklch array directly to linear-light sRGB."""
+
+    oklch_array = _require_color_array(oklch_array)
+    return linear_srgb_from_oklab(oklab_from_oklch(oklch_array))
+
+
+def oklch_from_linear_srgb(linear_srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW linear-light sRGB array directly to Oklch."""
+
+    linear_srgb_array = _require_color_array(linear_srgb_array)
+    return oklch_from_oklab(oklab_from_linear_srgb(linear_srgb_array))
+
+
+def oklch_from_srgb(srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array directly to Oklch."""
+
+    srgb_array = _require_color_array(srgb_array)
+    return oklch_from_linear_srgb(linear_srgb_from_srgb(srgb_array))
+
+
+def srgb_from_oklch(oklch_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklch array directly to gamma-corrected sRGB."""
+
+    oklch_array = _require_color_array(oklch_array)
+    return srgb_from_linear_srgb(linear_srgb_from_oklch(oklch_array))
+
+
+def oklch_from_xyz(xyz_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW normalized XYZ array, where D65 white is approximately 1.0, to Oklch."""
+
+    xyz_array = _require_color_array(xyz_array)
+    return oklch_from_oklab(oklab_from_xyz(xyz_array))
+
+
+def xyz_from_oklch(oklch_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW Oklch array to normalized XYZ, where D65 white is approximately 1.0."""
+
+    oklch_array = _require_color_array(oklch_array)
+    return xyz_from_oklab(oklab_from_oklch(oklch_array))
+
+
+def _max_srgb_saturation_array(units_ab_array: np.ndarray, steps: int = 1) -> np.ndarray:
+    rgb_k_matrix = np.array(
         [
             [1.19086277, 1.76576728, 0.59662641, 0.75515197, 0.56771245],
             [0.73956515, -0.45954494, 0.08285427, 0.12541070, 0.14503204],
             [1.35733652, -0.00915799, -1.15130210, -0.50559606, 0.00692167],
         ],
-        dtype=units_ab_tensor.dtype,
-        device=units_ab_tensor.device,
+        dtype=units_ab_array.dtype,
     )
-    rgb_w_matrix = _matrix_tensor(_LMS_TO_LINEAR_SRGB_MATRIX, units_ab_tensor)
-    cond_r_tensor = torch.add(
-        torch.mul(-1.88170328, units_ab_tensor[0, :, :]), torch.mul(-0.80936493, units_ab_tensor[1, :, :])
-    )
-    cond_g_tensor = torch.add(
-        torch.mul(1.81444104, units_ab_tensor[0, :, :]), torch.mul(-1.19445276, units_ab_tensor[1, :, :])
-    )
-    terms_tensor = torch.stack(
+    rgb_w_matrix = _matrix_tensor(_LMS_TO_LINEAR_SRGB_MATRIX, units_ab_array)
+    cond_r_array = -1.88170328 * units_ab_array[0, :, :] + -0.80936493 * units_ab_array[1, :, :]
+    cond_g_array = 1.81444104 * units_ab_array[0, :, :] + -1.19445276 * units_ab_array[1, :, :]
+    terms_array = np.stack(
         [
-            torch.ones(units_ab_tensor.shape[1:], dtype=units_ab_tensor.dtype, device=units_ab_tensor.device),
-            units_ab_tensor[0, :, :],
-            units_ab_tensor[1, :, :],
-            torch.pow(units_ab_tensor[0, :, :], 2.0),
-            torch.mul(units_ab_tensor[0, :, :], units_ab_tensor[1, :, :]),
+            np.ones(units_ab_array.shape[1:], dtype=units_ab_array.dtype),
+            units_ab_array[0, :, :],
+            units_ab_array[1, :, :],
+            np.power(units_ab_array[0, :, :], 2.0),
+            units_ab_array[0, :, :] * units_ab_array[1, :, :],
         ]
     )
-    s_tensor = torch.where(
-        torch.gt(cond_r_tensor, 1.0),
-        torch.einsum("twh, t -> wh", terms_tensor, rgb_k_matrix[0]),
-        torch.where(
-            torch.gt(cond_g_tensor, 1.0),
-            torch.einsum("twh, t -> wh", terms_tensor, rgb_k_matrix[1]),
-            torch.einsum("twh, t -> wh", terms_tensor, rgb_k_matrix[2]),
+    s_array = np.where(
+        cond_r_array > 1.0,
+        np.einsum("twh, t -> wh", terms_array, rgb_k_matrix[0]),
+        np.where(
+            cond_g_array > 1.0,
+            np.einsum("twh, t -> wh", terms_array, rgb_k_matrix[1]),
+            np.einsum("twh, t -> wh", terms_array, rgb_k_matrix[2]),
         ),
     )
-    k_lms_matrix = _matrix_tensor(tuple(row[1:] for row in _OKLAB_TO_LMS_CUBE_ROOT_MATRIX), units_ab_tensor)
-    k_lms_tensor = torch.einsum("tc, cwh -> twh", k_lms_matrix, units_ab_tensor)
+    k_lms_matrix = _matrix_tensor(tuple(row[1:] for row in _OKLAB_TO_LMS_CUBE_ROOT_MATRIX), units_ab_array)
+    k_lms_array = np.einsum("tc, cwh -> twh", k_lms_matrix, units_ab_array)
     for _ in range(steps):
-        root_lms_tensor = torch.add(torch.mul(k_lms_tensor, s_tensor), 1.0)
-        lms_tensor = torch.pow(root_lms_tensor, 3.0)
-        lms_ds_tensor = torch.mul(torch.mul(k_lms_tensor, torch.pow(root_lms_tensor, 2.0)), 3.0)
-        lms_ds2_tensor = torch.mul(torch.mul(torch.pow(k_lms_tensor, 2.0), root_lms_tensor), 6.0)
-        f_tensor = torch.where(
-            torch.gt(cond_r_tensor, 1.0),
-            torch.einsum("c, cwh -> wh", rgb_w_matrix[0], lms_tensor),
-            torch.where(
-                torch.gt(cond_g_tensor, 1.0),
-                torch.einsum("c, cwh -> wh", rgb_w_matrix[1], lms_tensor),
-                torch.einsum("c, cwh -> wh", rgb_w_matrix[2], lms_tensor),
+        root_lms_array = k_lms_array * s_array + 1.0
+        lms_array = np.power(root_lms_array, 3.0)
+        lms_ds_array = (np.power(root_lms_array, 2.0) * k_lms_array) * 3.0
+        lms_ds2_array = (np.power(k_lms_array, 2.0) * root_lms_array) * 6.0
+        f_array = np.where(
+            cond_r_array > 1.0,
+            np.einsum("c, cwh -> wh", rgb_w_matrix[0], lms_array),
+            np.where(
+                cond_g_array > 1.0,
+                np.einsum("c, cwh -> wh", rgb_w_matrix[1], lms_array),
+                np.einsum("c, cwh -> wh", rgb_w_matrix[2], lms_array),
             ),
         )
-        f_tensor_1 = torch.where(
-            torch.gt(cond_r_tensor, 1.0),
-            torch.einsum("c, cwh -> wh", rgb_w_matrix[0], lms_ds_tensor),
-            torch.where(
-                torch.gt(cond_g_tensor, 1.0),
-                torch.einsum("c, cwh -> wh", rgb_w_matrix[1], lms_ds_tensor),
-                torch.einsum("c, cwh -> wh", rgb_w_matrix[2], lms_ds_tensor),
+        f_array_1 = np.where(
+            cond_r_array > 1.0,
+            np.einsum("c, cwh -> wh", rgb_w_matrix[0], lms_ds_array),
+            np.where(
+                cond_g_array > 1.0,
+                np.einsum("c, cwh -> wh", rgb_w_matrix[1], lms_ds_array),
+                np.einsum("c, cwh -> wh", rgb_w_matrix[2], lms_ds_array),
             ),
         )
-        f_tensor_2 = torch.where(
-            torch.gt(cond_r_tensor, 1.0),
-            torch.einsum("c, cwh -> wh", rgb_w_matrix[0], lms_ds2_tensor),
-            torch.where(
-                torch.gt(cond_g_tensor, 1.0),
-                torch.einsum("c, cwh -> wh", rgb_w_matrix[1], lms_ds2_tensor),
-                torch.einsum("c, cwh -> wh", rgb_w_matrix[2], lms_ds2_tensor),
+        f_array_2 = np.where(
+            cond_r_array > 1.0,
+            np.einsum("c, cwh -> wh", rgb_w_matrix[0], lms_ds2_array),
+            np.where(
+                cond_g_array > 1.0,
+                np.einsum("c, cwh -> wh", rgb_w_matrix[1], lms_ds2_array),
+                np.einsum("c, cwh -> wh", rgb_w_matrix[2], lms_ds2_array),
             ),
         )
-        s_tensor = torch.sub(
-            s_tensor,
-            torch.div(
-                torch.mul(f_tensor, f_tensor_1),
-                torch.sub(torch.pow(f_tensor_1, 2.0), torch.mul(torch.mul(f_tensor, f_tensor_2), 0.5)),
-            ),
-        )
-    return s_tensor
+        s_array = s_array - (f_array * f_array_1) / (np.power(f_array_1, 2.0) - (f_array * f_array_2) * 0.5)
+    return s_array
 
 
-def _find_cusp_tensor(units_ab_tensor: torch.Tensor, steps: int = 1) -> torch.Tensor:
-    s_cusp_tensor = _max_srgb_saturation_tensor(units_ab_tensor, steps=steps)
-    oklab_tensor = torch.stack(
+def _find_cusp_array(units_ab_array: np.ndarray, steps: int = 1) -> np.ndarray:
+    s_cusp_array = _max_srgb_saturation_array(units_ab_array, steps=steps)
+    oklab_array = np.stack(
         [
-            torch.ones(s_cusp_tensor.shape, dtype=s_cusp_tensor.dtype, device=s_cusp_tensor.device),
-            torch.mul(s_cusp_tensor, units_ab_tensor[0, :, :]),
-            torch.mul(s_cusp_tensor, units_ab_tensor[1, :, :]),
+            np.ones(s_cusp_array.shape, dtype=s_cusp_array.dtype),
+            s_cusp_array * units_ab_array[0, :, :],
+            s_cusp_array * units_ab_array[1, :, :],
         ]
     )
-    rgb_at_max_tensor = linear_srgb_from_oklab(oklab_tensor)
-    l_cusp_tensor = torch.pow(torch.div(1.0, rgb_at_max_tensor.max(0).values), 1.0 / 3.0)
-    c_cusp_tensor = torch.mul(l_cusp_tensor, s_cusp_tensor)
-    return torch.stack([l_cusp_tensor, c_cusp_tensor])
+    rgb_at_max_array = linear_srgb_from_oklab(oklab_array)
+    l_cusp_array = np.power(1.0 / rgb_at_max_array.max(axis=0), 1.0 / 3.0)
+    c_cusp_array = l_cusp_array * s_cusp_array
+    return np.stack([l_cusp_array, c_cusp_array])
 
 
-def _find_gamut_intersection_tensor(
-    units_ab_tensor: torch.Tensor,
-    l_1_tensor: torch.Tensor,
-    c_1_tensor: torch.Tensor,
-    l_0_tensor: torch.Tensor,
+def _find_gamut_intersection_array(
+    units_ab_array: np.ndarray,
+    l_1_array: np.ndarray,
+    c_1_array: np.ndarray,
+    l_0_array: np.ndarray,
     steps: int = 1,
     steps_outer: int = 1,
-    lc_cusps_tensor: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if lc_cusps_tensor is None:
-        lc_cusps_tensor = _find_cusp_tensor(units_ab_tensor, steps=steps)
-    cond_tensor = torch.sub(
-        torch.mul(torch.sub(l_1_tensor, l_0_tensor), lc_cusps_tensor[1, :, :]),
-        torch.mul(torch.sub(lc_cusps_tensor[0, :, :], l_0_tensor), c_1_tensor),
-    )
-    t_tensor = torch.where(
-        torch.le(cond_tensor, 0.0),
-        torch.div(
-            torch.mul(lc_cusps_tensor[1, :, :], l_0_tensor),
-            torch.add(
-                torch.mul(c_1_tensor, lc_cusps_tensor[0, :, :]),
-                torch.mul(lc_cusps_tensor[1, :, :], torch.sub(l_0_tensor, l_1_tensor)),
-            ),
-        ),
-        torch.div(
-            torch.mul(lc_cusps_tensor[1, :, :], torch.sub(l_0_tensor, 1.0)),
-            torch.add(
-                torch.mul(c_1_tensor, torch.sub(lc_cusps_tensor[0, :, :], 1.0)),
-                torch.mul(lc_cusps_tensor[1, :, :], torch.sub(l_0_tensor, l_1_tensor)),
-            ),
-        ),
+    lc_cusps_array: np.ndarray | None = None,
+) -> np.ndarray:
+    if lc_cusps_array is None:
+        lc_cusps_array = _find_cusp_array(units_ab_array, steps=steps)
+    cond_array = (l_1_array - l_0_array) * lc_cusps_array[1, :, :] - (lc_cusps_array[0, :, :] - l_0_array) * c_1_array
+    t_array = np.where(
+        cond_array <= 0.0,
+        (lc_cusps_array[1, :, :] * l_0_array)
+        / (c_1_array * lc_cusps_array[0, :, :] + lc_cusps_array[1, :, :] * (l_0_array - l_1_array)),
+        (lc_cusps_array[1, :, :] * (l_0_array - 1.0))
+        / (c_1_array * (lc_cusps_array[0, :, :] - 1.0) + lc_cusps_array[1, :, :] * (l_0_array - l_1_array)),
     )
     for _ in range(steps_outer):
-        dl_tensor = torch.sub(l_1_tensor, l_0_tensor)
-        dc_tensor = c_1_tensor
-        k_lms_matrix = _matrix_tensor(tuple(row[1:] for row in _OKLAB_TO_LMS_CUBE_ROOT_MATRIX), units_ab_tensor)
-        k_lms_tensor = torch.einsum("tc, cwh -> twh", k_lms_matrix, units_ab_tensor)
-        lms_dt_tensor = torch.add(torch.mul(k_lms_tensor, dc_tensor), dl_tensor)
+        dl_array = l_1_array - l_0_array
+        dc_array = c_1_array
+        k_lms_matrix = _matrix_tensor(tuple(row[1:] for row in _OKLAB_TO_LMS_CUBE_ROOT_MATRIX), units_ab_array)
+        k_lms_array = np.einsum("tc, cwh -> twh", k_lms_matrix, units_ab_array)
+        lms_dt_array = k_lms_array * dc_array + dl_array
         for _ in range(steps):
-            l_tensor = torch.add(
-                torch.mul(l_0_tensor, torch.add(torch.mul(t_tensor, -1.0), 1.0)), torch.mul(t_tensor, l_1_tensor)
-            )
-            c_tensor = torch.mul(t_tensor, c_1_tensor)
-            root_lms_tensor = torch.add(torch.mul(k_lms_tensor, c_tensor), l_tensor)
-            lms_tensor = torch.pow(root_lms_tensor, 3.0)
-            lms_dt_tensor_1 = torch.mul(torch.mul(torch.pow(root_lms_tensor, 2.0), lms_dt_tensor), 3.0)
-            lms_dt2_tensor = torch.mul(torch.mul(torch.pow(lms_dt_tensor, 2.0), root_lms_tensor), 6.0)
-            rgb_matrix = _matrix_tensor(_LMS_TO_LINEAR_SRGB_MATRIX, units_ab_tensor)
-            rgb_tensor = torch.sub(torch.einsum("qt, twh -> qwh", rgb_matrix, lms_tensor), 1.0)
-            rgb_tensor_1 = torch.einsum("qt, twh -> qwh", rgb_matrix, lms_dt_tensor_1)
-            rgb_tensor_2 = torch.einsum("qt, twh -> qwh", rgb_matrix, lms_dt2_tensor)
-            u_rgb_tensor = torch.div(
-                rgb_tensor_1,
-                torch.sub(torch.pow(rgb_tensor_1, 2.0), torch.mul(torch.mul(rgb_tensor, rgb_tensor_2), 0.5)),
-            )
-            t_rgb_tensor = torch.mul(torch.mul(rgb_tensor, -1.0), u_rgb_tensor)
-            max_floats = torch.mul(
-                MAX_FLOAT, torch.ones(t_rgb_tensor.shape, dtype=t_rgb_tensor.dtype, device=t_rgb_tensor.device)
-            )
-            t_rgb_tensor = torch.where(torch.lt(u_rgb_tensor, 0.0), max_floats, t_rgb_tensor)
-            t_tensor = torch.where(
-                torch.gt(cond_tensor, 0.0), torch.add(t_tensor, t_rgb_tensor.min(0).values), t_tensor
-            )
-    return t_tensor
+            l_array = l_0_array * (t_array * -1.0 + 1.0) + t_array * l_1_array
+            c_array = t_array * c_1_array
+            root_lms_array = k_lms_array * c_array + l_array
+            lms_array = np.power(root_lms_array, 3.0)
+            lms_dt_array_1 = (np.power(root_lms_array, 2.0) * lms_dt_array) * 3.0
+            lms_dt2_array = (np.power(lms_dt_array, 2.0) * root_lms_array) * 6.0
+            rgb_matrix = _matrix_tensor(_LMS_TO_LINEAR_SRGB_MATRIX, units_ab_array)
+            rgb_array = np.einsum("qt, twh -> qwh", rgb_matrix, lms_array) - 1.0
+            rgb_array_1 = np.einsum("qt, twh -> qwh", rgb_matrix, lms_dt_array_1)
+            rgb_array_2 = np.einsum("qt, twh -> qwh", rgb_matrix, lms_dt2_array)
+            u_rgb_array = rgb_array_1 / (np.power(rgb_array_1, 2.0) - (rgb_array * rgb_array_2) * 0.5)
+            t_rgb_raw = rgb_array * -1.0 * u_rgb_array
+            max_floats = np.full(t_rgb_raw.shape, MAX_FLOAT, dtype=t_rgb_raw.dtype)
+            t_rgb_array = np.where(u_rgb_array < 0.0, max_floats, t_rgb_raw)
+            t_array = np.where(cond_array > 0.0, t_array + t_rgb_array.min(axis=0), t_array)
+    return t_array
 
 
-def gamut_clip_tensor(
-    rgb_l_tensor: torch.Tensor, alpha: float = 0.05, steps: int = 1, steps_outer: int = 1
-) -> torch.Tensor:
-    rgb_l_tensor = _require_color_tensor(rgb_l_tensor)
-    lab_tensor = oklab_from_linear_srgb(rgb_l_tensor)
+def gamut_clip_tensor(rgb_l_array: np.ndarray, alpha: float = 0.05, steps: int = 1, steps_outer: int = 1) -> np.ndarray:
+    rgb_l_array = _require_color_array(rgb_l_array)
+    lab_array = oklab_from_linear_srgb(rgb_l_array)
     epsilon = 0.00001
-    chroma_tensor = torch.sqrt(torch.add(torch.pow(lab_tensor[1, :, :], 2.0), torch.pow(lab_tensor[2, :, :], 2.0)))
-    chroma_tensor = torch.where(torch.lt(chroma_tensor, epsilon), epsilon, chroma_tensor)
-    units_ab_tensor = torch.div(lab_tensor[1:, :, :], chroma_tensor)
-    l_d_tensor = torch.sub(lab_tensor[0], 0.5)
-    e_1_tensor = torch.add(torch.add(torch.abs(l_d_tensor), torch.mul(chroma_tensor, alpha)), 0.5)
-    l_0_tensor = torch.mul(
-        torch.add(
-            torch.mul(
-                torch.sign(l_d_tensor),
-                torch.sub(
-                    e_1_tensor, torch.sqrt(torch.sub(torch.pow(e_1_tensor, 2.0), torch.mul(torch.abs(l_d_tensor), 2.0)))
-                ),
-            ),
-            1.0,
-        ),
-        0.5,
+    chroma_array = np.sqrt(np.power(lab_array[1, :, :], 2.0) + np.power(lab_array[2, :, :], 2.0))
+    chroma_array = np.where(chroma_array < epsilon, epsilon, chroma_array)
+    units_ab_array = lab_array[1:, :, :] / chroma_array
+    l_d_array = lab_array[0] - 0.5
+    e_1_array = np.abs(l_d_array) + chroma_array * alpha + 0.5
+    l_0_array = (
+        np.sign(l_d_array) * (e_1_array - np.sqrt(np.power(e_1_array, 2.0) - np.abs(l_d_array) * 2.0)) + 1.0
+    ) * 0.5
+    t_array = _find_gamut_intersection_array(
+        units_ab_array, lab_array[0, :, :], chroma_array, l_0_array, steps=steps, steps_outer=steps_outer
     )
-    t_tensor = _find_gamut_intersection_tensor(
-        units_ab_tensor, lab_tensor[0, :, :], chroma_tensor, l_0_tensor, steps=steps, steps_outer=steps_outer
-    )
-    l_clipped_tensor = torch.add(
-        torch.mul(l_0_tensor, torch.add(torch.mul(t_tensor, -1), 1.0)), torch.mul(t_tensor, lab_tensor[0, :, :])
-    )
-    c_clipped_tensor = torch.mul(t_tensor, chroma_tensor)
-    return torch.where(
-        torch.logical_or(torch.gt(rgb_l_tensor.max(0).values, 1.0), torch.lt(rgb_l_tensor.min(0).values, 0.0)),
+    l_clipped_array = l_0_array * (t_array * -1 + 1.0) + t_array * lab_array[0, :, :]
+    c_clipped_array = t_array * chroma_array
+    return np.where(
+        np.logical_or(rgb_l_array.max(axis=0) > 1.0, rgb_l_array.min(axis=0) < 0.0),
         linear_srgb_from_oklab(
-            torch.stack(
+            np.stack(
                 [
-                    l_clipped_tensor,
-                    torch.mul(c_clipped_tensor, units_ab_tensor[0, :, :]),
-                    torch.mul(c_clipped_tensor, units_ab_tensor[1, :, :]),
+                    l_clipped_array,
+                    c_clipped_array * units_ab_array[0, :, :],
+                    c_clipped_array * units_ab_array[1, :, :],
                 ]
             )
         ),
-        rgb_l_tensor,
+        rgb_l_array,
     )
 
 
-def _st_cusps_from_lc(lc_cusps_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.stack(
+def _st_cusps_from_lc(lc_cusps_array: np.ndarray) -> np.ndarray:
+    return np.stack(
         [
-            torch.div(lc_cusps_tensor[1, :, :], lc_cusps_tensor[0, :, :]),
-            torch.div(lc_cusps_tensor[1, :, :], torch.add(torch.mul(lc_cusps_tensor[0, :, :], -1.0), 1)),
+            lc_cusps_array[1, :, :] / lc_cusps_array[0, :, :],
+            lc_cusps_array[1, :, :] / (lc_cusps_array[0, :, :] * -1.0 + 1),
         ]
     )
 
 
-def _ok_l_r_from_l_tensor(x_tensor: torch.Tensor) -> torch.Tensor:
+def _ok_l_r_from_l_array(x_array: np.ndarray) -> np.ndarray:
     k_1 = 0.206
     k_2 = 0.03
     k_3 = (1.0 + k_1) / (1.0 + k_2)
-    return torch.mul(
-        torch.add(
-            torch.sub(torch.mul(x_tensor, k_3), k_1),
-            torch.sqrt(
-                torch.add(
-                    torch.pow(torch.sub(torch.mul(x_tensor, k_3), k_1), 2.0),
-                    torch.mul(torch.mul(torch.mul(x_tensor, k_3), k_2), 4.0),
+    return ((x_array * k_3 - k_1) + np.sqrt(np.power(x_array * k_3 - k_1, 2.0) + x_array * k_3 * k_2 * 4.0)) * 0.5
+
+
+def _ok_l_from_lr_array(x_array: np.ndarray) -> np.ndarray:
+    k_1 = 0.206
+    k_2 = 0.03
+    k_3 = (1.0 + k_1) / (1.0 + k_2)
+    return (np.power(x_array, 2.0) + x_array * k_1) / ((x_array + k_2) * k_3)
+
+
+def srgb_from_okhsv(okhsv_array: np.ndarray, alpha: float = 0.05, steps: int = 1) -> np.ndarray:
+    """Convert a 3xHxW Okhsv array, with hue in degrees, to gamma-corrected sRGB."""
+
+    okhsv_array = _require_color_array(okhsv_array)
+    okhsv_array = okhsv_array.copy()
+    okhsv_array[1:, ...] = np.clip(okhsv_array[1:, ...], 0.0, 1.0)
+    unit_hue_array = _unit_hue_from_degrees(okhsv_array[0, :, :])
+    units_ab_array = np.stack([np.cos(unit_hue_array * (2.0 * PI)), np.sin(unit_hue_array * (2.0 * PI))])
+    lc_cusps_array = _find_cusp_array(units_ab_array, steps=steps)
+    st_max_array = _st_cusps_from_lc(lc_cusps_array)
+    s_0_array = _full_like_spatial(st_max_array, 0.5)
+    k_array = (s_0_array / st_max_array[0, :, :]) * -1.0 + 1
+    lc_v_base_array = s_0_array + (st_max_array[1, :, :] - st_max_array[1, :, :] * (k_array * okhsv_array[1, :, :]))
+    lc_v_array = np.stack(
+        [
+            (okhsv_array[1, :, :] * s_0_array * -1.0) / lc_v_base_array + 1.0,
+            (okhsv_array[1, :, :] * st_max_array[1, :, :] * s_0_array) / lc_v_base_array,
+        ]
+    )
+    lc_array = okhsv_array[2, :, :] * lc_v_array
+    l_vt_array = _ok_l_from_lr_array(lc_v_array[0, :, :])
+    c_vt_array = lc_v_array[1, :, :] * (l_vt_array / lc_v_array[0, :, :])
+    l_new_array = _ok_l_from_lr_array(lc_array[0, :, :])
+    lc_array[1, :, :] = lc_array[1, :, :] * (l_new_array / lc_array[0, :, :])
+    lc_array[0, :, :] = l_new_array
+    rgb_scale_array = linear_srgb_from_oklab(
+        np.stack(
+            [
+                l_vt_array,
+                units_ab_array[0, :, :] * c_vt_array,
+                units_ab_array[1, :, :] * c_vt_array,
+            ]
+        )
+    )
+    scale_l_array = np.power(
+        1.0 / np.maximum(rgb_scale_array.max(axis=0), np.zeros(rgb_scale_array.shape[1:], dtype=rgb_scale_array.dtype)),
+        1.0 / 3.0,
+    )
+    lc_array = lc_array * np.broadcast_to(scale_l_array, lc_array.shape)
+    rgb_array = linear_srgb_from_oklab(
+        np.stack(
+            [
+                lc_array[0, :, :],
+                units_ab_array[0, :, :] * lc_array[1, :, :],
+                units_ab_array[1, :, :] * lc_array[1, :, :],
+            ]
+        )
+    )
+    rgb_array = srgb_from_linear_srgb(gamut_clip_tensor(rgb_array, alpha=alpha, steps=steps))
+    return np.clip(np.where(np.isnan(rgb_array), 0.0, rgb_array), 0.0, 1.0)
+
+
+def okhsv_from_srgb(srgb_array: np.ndarray, steps: int = 1) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array to Okhsv, with hue in degrees."""
+
+    srgb_array = _require_color_array(srgb_array)
+    lab_array = oklab_from_linear_srgb(linear_srgb_from_srgb(srgb_array))
+    c_array = np.sqrt(np.power(lab_array[1, :, :], 2.0) + np.power(lab_array[2, :, :], 2.0))
+    units_ab_array = lab_array[1:, :, :] / c_array
+    h_array = np.arctan2(lab_array[2, :, :] * -1.0, lab_array[1, :, :] * -1.0) * 0.5 / PI + 0.5
+    lc_cusps_array = _find_cusp_array(units_ab_array, steps=steps)
+    st_max_array = _st_cusps_from_lc(lc_cusps_array)
+    s_0_array = _full_like_spatial(st_max_array, 0.5)
+    k_array = (s_0_array / st_max_array[0, :, :]) * -1.0 + 1
+    t_array = st_max_array[1, :, :] / (c_array + lab_array[0, :, :] * st_max_array[1, :, :])
+    l_v_array = t_array * lab_array[0, :, :]
+    c_v_array = t_array * c_array
+    l_vt_array = _ok_l_from_lr_array(l_v_array)
+    c_vt_array = c_v_array * (l_vt_array / l_v_array)
+    rgb_scale_array = linear_srgb_from_oklab(
+        np.stack(
+            [
+                l_vt_array,
+                units_ab_array[0, :, :] * c_vt_array,
+                units_ab_array[1, :, :] * c_vt_array,
+            ]
+        )
+    )
+    scale_l_array = np.power(
+        1.0 / np.maximum(rgb_scale_array.max(axis=0), np.zeros(rgb_scale_array.shape[1:], dtype=rgb_scale_array.dtype)),
+        1.0 / 3.0,
+    )
+    lab_array[0, :, :] = lab_array[0, :, :] / scale_l_array
+    c_array = c_array / scale_l_array
+    c_array = c_array * (_ok_l_r_from_l_array(lab_array[0, :, :]) / lab_array[0, :, :])
+    lab_array[0, :, :] = _ok_l_r_from_l_array(lab_array[0, :, :])
+    v_array = lab_array[0, :, :] / l_v_array
+    s_array = ((s_0_array + st_max_array[1, :, :]) * c_v_array) / (
+        st_max_array[1, :, :] * s_0_array + st_max_array[1, :, :] * (k_array * c_v_array)
+    )
+    hsv_array = np.stack([_degrees_from_unit_hue(h_array), s_array, v_array])
+    hsv_array = np.where(np.isnan(hsv_array), 0.0, hsv_array)
+    hsv_array[1:, ...] = np.clip(hsv_array[1:, ...], 0.0, 1.0)
+    return hsv_array
+
+
+def _get_st_mid_array(units_ab_array: np.ndarray) -> np.ndarray:
+    a = units_ab_array[0, :, :]
+    b = units_ab_array[1, :, :]
+    return np.stack(
+        [
+            1.0
+            / (
+                b * 4.15901240
+                + a
+                * (
+                    b * 1.75198401
+                    + a * (b * -10.02301043 + a * (b * 5.38770819 + a * 4.69891013 + -4.24894561) + -2.13704948)
+                    + -2.19557347
                 )
-            ),
-        ),
-        0.5,
-    )
-
-
-def _ok_l_from_lr_tensor(x_tensor: torch.Tensor) -> torch.Tensor:
-    k_1 = 0.206
-    k_2 = 0.03
-    k_3 = (1.0 + k_1) / (1.0 + k_2)
-    return torch.div(
-        torch.add(torch.pow(x_tensor, 2.0), torch.mul(x_tensor, k_1)), torch.mul(torch.add(x_tensor, k_2), k_3)
-    )
-
-
-def srgb_from_okhsv(okhsv_tensor: torch.Tensor, alpha: float = 0.05, steps: int = 1) -> torch.Tensor:
-    """Convert a 3xHxW Okhsv tensor, with hue in degrees, to gamma-corrected sRGB."""
-
-    okhsv_tensor = _require_color_tensor(okhsv_tensor)
-    okhsv_tensor = okhsv_tensor.clone()
-    okhsv_tensor[1:, ...] = okhsv_tensor[1:, ...].clamp(0.0, 1.0)
-    unit_hue_tensor = _unit_hue_from_degrees(okhsv_tensor[0, :, :])
-    units_ab_tensor = torch.stack(
-        [torch.cos(torch.mul(unit_hue_tensor, 2.0 * PI)), torch.sin(torch.mul(unit_hue_tensor, 2.0 * PI))]
-    )
-    lc_cusps_tensor = _find_cusp_tensor(units_ab_tensor, steps=steps)
-    st_max_tensor = _st_cusps_from_lc(lc_cusps_tensor)
-    s_0_tensor = _full_like_spatial(st_max_tensor, 0.5)
-    k_tensor = torch.add(torch.mul(torch.div(s_0_tensor, st_max_tensor[0, :, :]), -1.0), 1)
-    lc_v_base_tensor = torch.add(
-        s_0_tensor,
-        torch.sub(
-            st_max_tensor[1, :, :], torch.mul(st_max_tensor[1, :, :], torch.mul(k_tensor, okhsv_tensor[1, :, :]))
-        ),
-    )
-    lc_v_tensor = torch.stack(
-        [
-            torch.add(torch.div(torch.mul(torch.mul(okhsv_tensor[1, :, :], s_0_tensor), -1.0), lc_v_base_tensor), 1.0),
-            torch.div(
-                torch.mul(torch.mul(okhsv_tensor[1, :, :], st_max_tensor[1, :, :]), s_0_tensor), lc_v_base_tensor
-            ),
-        ]
-    )
-    lc_tensor = torch.mul(okhsv_tensor[2, :, :], lc_v_tensor)
-    l_vt_tensor = _ok_l_from_lr_tensor(lc_v_tensor[0, :, :])
-    c_vt_tensor = torch.mul(lc_v_tensor[1, :, :], torch.div(l_vt_tensor, lc_v_tensor[0, :, :]))
-    l_new_tensor = _ok_l_from_lr_tensor(lc_tensor[0, :, :])
-    lc_tensor[1, :, :] = torch.mul(lc_tensor[1, :, :], torch.div(l_new_tensor, lc_tensor[0, :, :]))
-    lc_tensor[0, :, :] = l_new_tensor
-    rgb_scale_tensor = linear_srgb_from_oklab(
-        torch.stack(
-            [
-                l_vt_tensor,
-                torch.mul(units_ab_tensor[0, :, :], c_vt_tensor),
-                torch.mul(units_ab_tensor[1, :, :], c_vt_tensor),
-            ]
-        )
-    )
-    scale_l_tensor = torch.pow(
-        torch.div(
-            1.0,
-            torch.max(
-                rgb_scale_tensor.max(0).values,
-                torch.zeros(rgb_scale_tensor.shape[1:], dtype=rgb_scale_tensor.dtype, device=rgb_scale_tensor.device),
-            ),
-        ),
-        1.0 / 3.0,
-    )
-    lc_tensor = torch.mul(lc_tensor, scale_l_tensor.expand(lc_tensor.shape))
-    rgb_tensor = linear_srgb_from_oklab(
-        torch.stack(
-            [
-                lc_tensor[0, :, :],
-                torch.mul(units_ab_tensor[0, :, :], lc_tensor[1, :, :]),
-                torch.mul(units_ab_tensor[1, :, :], lc_tensor[1, :, :]),
-            ]
-        )
-    )
-    rgb_tensor = srgb_from_linear_srgb(gamut_clip_tensor(rgb_tensor, alpha=alpha, steps=steps))
-    return torch.where(torch.isnan(rgb_tensor), 0.0, rgb_tensor).clamp(0.0, 1.0)
-
-
-def okhsv_from_srgb(srgb_tensor: torch.Tensor, steps: int = 1) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor to Okhsv, with hue in degrees."""
-
-    srgb_tensor = _require_color_tensor(srgb_tensor)
-    lab_tensor = oklab_from_linear_srgb(linear_srgb_from_srgb(srgb_tensor))
-    c_tensor = torch.sqrt(torch.add(torch.pow(lab_tensor[1, :, :], 2.0), torch.pow(lab_tensor[2, :, :], 2.0)))
-    units_ab_tensor = torch.div(lab_tensor[1:, :, :], c_tensor)
-    h_tensor = torch.add(
-        torch.div(
-            torch.mul(torch.atan2(torch.mul(lab_tensor[2, :, :], -1.0), torch.mul(lab_tensor[1, :, :], -1.0)), 0.5), PI
-        ),
-        0.5,
-    )
-    lc_cusps_tensor = _find_cusp_tensor(units_ab_tensor, steps=steps)
-    st_max_tensor = _st_cusps_from_lc(lc_cusps_tensor)
-    s_0_tensor = _full_like_spatial(st_max_tensor, 0.5)
-    k_tensor = torch.add(torch.mul(torch.div(s_0_tensor, st_max_tensor[0, :, :]), -1.0), 1)
-    t_tensor = torch.div(
-        st_max_tensor[1, :, :], torch.add(c_tensor, torch.mul(lab_tensor[0, :, :], st_max_tensor[1, :, :]))
-    )
-    l_v_tensor = torch.mul(t_tensor, lab_tensor[0, :, :])
-    c_v_tensor = torch.mul(t_tensor, c_tensor)
-    l_vt_tensor = _ok_l_from_lr_tensor(l_v_tensor)
-    c_vt_tensor = torch.mul(c_v_tensor, torch.div(l_vt_tensor, l_v_tensor))
-    rgb_scale_tensor = linear_srgb_from_oklab(
-        torch.stack(
-            [
-                l_vt_tensor,
-                torch.mul(units_ab_tensor[0, :, :], c_vt_tensor),
-                torch.mul(units_ab_tensor[1, :, :], c_vt_tensor),
-            ]
-        )
-    )
-    scale_l_tensor = torch.pow(
-        torch.div(
-            1.0,
-            torch.max(
-                rgb_scale_tensor.max(0).values,
-                torch.zeros(rgb_scale_tensor.shape[1:], dtype=rgb_scale_tensor.dtype, device=rgb_scale_tensor.device),
-            ),
-        ),
-        1.0 / 3.0,
-    )
-    lab_tensor[0, :, :] = torch.div(lab_tensor[0, :, :], scale_l_tensor)
-    c_tensor = torch.div(c_tensor, scale_l_tensor)
-    c_tensor = torch.mul(c_tensor, torch.div(_ok_l_r_from_l_tensor(lab_tensor[0, :, :]), lab_tensor[0, :, :]))
-    lab_tensor[0, :, :] = _ok_l_r_from_l_tensor(lab_tensor[0, :, :])
-    v_tensor = torch.div(lab_tensor[0, :, :], l_v_tensor)
-    s_tensor = torch.div(
-        torch.mul(torch.add(s_0_tensor, st_max_tensor[1, :, :]), c_v_tensor),
-        torch.add(
-            torch.mul(st_max_tensor[1, :, :], s_0_tensor),
-            torch.mul(st_max_tensor[1, :, :], torch.mul(k_tensor, c_v_tensor)),
-        ),
-    )
-    hsv_tensor = torch.stack([_degrees_from_unit_hue(h_tensor), s_tensor, v_tensor])
-    hsv_tensor = torch.where(torch.isnan(hsv_tensor), 0.0, hsv_tensor)
-    hsv_tensor[1:, ...] = hsv_tensor[1:, ...].clamp(0.0, 1.0)
-    return hsv_tensor
-
-
-def _get_st_mid_tensor(units_ab_tensor: torch.Tensor) -> torch.Tensor:
-    return torch.stack(
-        [
-            torch.add(
-                torch.div(
-                    1.0,
-                    torch.add(
-                        torch.add(
-                            torch.mul(units_ab_tensor[1, :, :], 4.15901240),
-                            torch.mul(
-                                units_ab_tensor[0, :, :],
-                                torch.add(
-                                    torch.add(
-                                        torch.mul(units_ab_tensor[1, :, :], 1.75198401),
-                                        torch.mul(
-                                            units_ab_tensor[0, :, :],
-                                            torch.add(
-                                                torch.add(
-                                                    torch.mul(units_ab_tensor[1, :, :], -10.02301043),
-                                                    torch.mul(
-                                                        units_ab_tensor[0, :, :],
-                                                        torch.add(
-                                                            torch.add(
-                                                                torch.mul(units_ab_tensor[1, :, :], 5.38770819),
-                                                                torch.mul(units_ab_tensor[0, :, :], 4.69891013),
-                                                            ),
-                                                            -4.24894561,
-                                                        ),
-                                                    ),
-                                                ),
-                                                -2.13704948,
-                                            ),
-                                        ),
-                                    ),
-                                    -2.19557347,
-                                ),
-                            ),
-                        ),
-                        7.44778970,
-                    ),
-                ),
-                0.11516993,
-            ),
-            torch.add(
-                torch.div(
-                    1.0,
-                    torch.add(
-                        torch.add(
-                            torch.mul(units_ab_tensor[1, :, :], -0.68124379),
-                            torch.mul(
-                                units_ab_tensor[0, :, :],
-                                torch.add(
-                                    torch.add(
-                                        torch.mul(units_ab_tensor[1, :, :], 0.90148123),
-                                        torch.mul(
-                                            units_ab_tensor[0, :, :],
-                                            torch.add(
-                                                torch.add(
-                                                    torch.mul(units_ab_tensor[1, :, :], 0.61223990),
-                                                    torch.mul(
-                                                        units_ab_tensor[0, :, :],
-                                                        torch.add(
-                                                            torch.add(
-                                                                torch.mul(units_ab_tensor[1, :, :], -0.45399568),
-                                                                torch.mul(units_ab_tensor[0, :, :], -0.14661872),
-                                                            ),
-                                                            0.00299215,
-                                                        ),
-                                                    ),
-                                                ),
-                                                -0.27087943,
-                                            ),
-                                        ),
-                                    ),
-                                    0.40370612,
-                                ),
-                            ),
-                        ),
-                        1.61320320,
-                    ),
-                ),
-                0.11239642,
-            ),
+                + 7.44778970
+            )
+            + 0.11516993,
+            1.0
+            / (
+                b * -0.68124379
+                + a
+                * (
+                    b * 0.90148123
+                    + a * (b * 0.61223990 + a * (b * -0.45399568 + a * -0.14661872 + 0.00299215) + -0.27087943)
+                    + 0.40370612
+                )
+                + 1.61320320
+            )
+            + 0.11239642,
         ]
     )
 
 
-def _get_cs_tensor(
-    l_tensor: torch.Tensor, units_ab_tensor: torch.Tensor, steps: int = 1, steps_outer: int = 1
-) -> torch.Tensor:
-    lc_cusps_tensor = _find_cusp_tensor(units_ab_tensor, steps=steps)
-    c_max_tensor = _find_gamut_intersection_tensor(
-        units_ab_tensor,
-        l_tensor,
-        torch.ones(l_tensor.shape, dtype=l_tensor.dtype, device=l_tensor.device),
-        l_tensor,
-        lc_cusps_tensor=lc_cusps_tensor,
+def _get_cs_array(l_array: np.ndarray, units_ab_array: np.ndarray, steps: int = 1, steps_outer: int = 1) -> np.ndarray:
+    lc_cusps_array = _find_cusp_array(units_ab_array, steps=steps)
+    c_max_array = _find_gamut_intersection_array(
+        units_ab_array,
+        l_array,
+        np.ones(l_array.shape, dtype=l_array.dtype),
+        l_array,
+        lc_cusps_array=lc_cusps_array,
         steps=steps,
         steps_outer=steps_outer,
     )
-    st_max_tensor = _st_cusps_from_lc(lc_cusps_tensor)
-    k_tensor = torch.div(
-        c_max_tensor,
-        torch.min(
-            torch.mul(l_tensor, st_max_tensor[0, :, :]),
-            torch.mul(torch.add(torch.mul(l_tensor, -1.0), 1.0), st_max_tensor[1, :, :]),
-        ),
+    st_max_array = _st_cusps_from_lc(lc_cusps_array)
+    k_array = c_max_array / np.minimum(l_array * st_max_array[0, :, :], (l_array * -1.0 + 1.0) * st_max_array[1, :, :])
+    st_mid_array = _get_st_mid_array(units_ab_array)
+    c_a_array = l_array * st_mid_array[0, :, :]
+    c_b_array = (l_array * -1.0 + 1.0) * st_mid_array[1, :, :]
+    c_mid_array = (
+        k_array * np.sqrt(np.sqrt(1.0 / (1.0 / np.power(c_a_array, 4.0) + 1.0 / np.power(c_b_array, 4.0)))) * 0.9
     )
-    st_mid_tensor = _get_st_mid_tensor(units_ab_tensor)
-    c_a_tensor = torch.mul(l_tensor, st_mid_tensor[0, :, :])
-    c_b_tensor = torch.mul(torch.add(torch.mul(l_tensor, -1.0), 1.0), st_mid_tensor[1, :, :])
-    c_mid_tensor = torch.mul(
-        torch.mul(
-            k_tensor,
-            torch.sqrt(
-                torch.sqrt(
-                    torch.div(
-                        1.0,
-                        torch.add(
-                            torch.div(1.0, torch.pow(c_a_tensor, 4.0)), torch.div(1.0, torch.pow(c_b_tensor, 4.0))
-                        ),
-                    )
-                )
-            ),
-        ),
-        0.9,
-    )
-    c_a_tensor = torch.mul(l_tensor, 0.4)
-    c_b_tensor = torch.mul(torch.add(torch.mul(l_tensor, -1.0), 1.0), 0.8)
-    c_0_tensor = torch.sqrt(
-        torch.div(
-            1.0, torch.add(torch.div(1.0, torch.pow(c_a_tensor, 2.0)), torch.div(1.0, torch.pow(c_b_tensor, 2.0)))
-        )
-    )
-    return torch.stack([c_0_tensor, c_mid_tensor, c_max_tensor])
+    c_a_array = l_array * 0.4
+    c_b_array = (l_array * -1.0 + 1.0) * 0.8
+    c_0_array = np.sqrt(1.0 / (1.0 / np.power(c_a_array, 2.0) + 1.0 / np.power(c_b_array, 2.0)))
+    return np.stack([c_0_array, c_mid_array, c_max_array])
 
 
-def srgb_from_okhsl(
-    hsl_tensor: torch.Tensor, alpha: float = 0.05, steps: int = 1, steps_outer: int = 1
-) -> torch.Tensor:
-    """Convert a 3xHxW Okhsl tensor, with hue in degrees, to gamma-corrected sRGB."""
+def srgb_from_okhsl(hsl_array: np.ndarray, alpha: float = 0.05, steps: int = 1, steps_outer: int = 1) -> np.ndarray:
+    """Convert a 3xHxW Okhsl array, with hue in degrees, to gamma-corrected sRGB."""
 
-    hsl_tensor = _require_color_tensor(hsl_tensor)
-    hsl_tensor = hsl_tensor.clone()
-    hsl_tensor[1:, ...] = hsl_tensor[1:, ...].clamp(0.0, 1.0)
-    l_ones_mask = torch.eq(hsl_tensor[2, :, :], 1.0)
-    l_zeros_mask = torch.eq(hsl_tensor[2, :, :], 0.0)
-    l_ones_mask = l_ones_mask.expand(hsl_tensor.shape)
-    l_zeros_mask = l_zeros_mask.expand(hsl_tensor.shape)
-    calc_rgb_mask = torch.logical_not(torch.logical_or(l_ones_mask, l_zeros_mask))
-    rgb_tensor = torch.empty_like(hsl_tensor)
-    rgb_tensor = torch.where(l_ones_mask, 1.0, torch.where(l_zeros_mask, 0.0, rgb_tensor))
-    unit_hue_tensor = _unit_hue_from_degrees(hsl_tensor[0, :, :])
-    units_ab_tensor = torch.stack(
-        [torch.cos(torch.mul(unit_hue_tensor, 2.0 * PI)), torch.sin(torch.mul(unit_hue_tensor, 2.0 * PI))]
-    )
-    l_tensor = _ok_l_from_lr_tensor(hsl_tensor[2, :, :])
-    cs_tensor = _get_cs_tensor(l_tensor, units_ab_tensor, steps=steps, steps_outer=steps_outer)
+    hsl_array = _require_color_array(hsl_array)
+    hsl_array = hsl_array.copy()
+    hsl_array[1:, ...] = np.clip(hsl_array[1:, ...], 0.0, 1.0)
+    l_ones_mask = hsl_array[2, :, :] == 1.0
+    l_zeros_mask = hsl_array[2, :, :] == 0.0
+    calc_rgb_mask = np.logical_not(np.logical_or(l_ones_mask, l_zeros_mask))
+    rgb_array = np.empty_like(hsl_array)
+    rgb_array = np.where(l_ones_mask, 1.0, np.where(l_zeros_mask, 0.0, rgb_array))
+    unit_hue_array = _unit_hue_from_degrees(hsl_array[0, :, :])
+    units_ab_array = np.stack([np.cos(unit_hue_array * (2.0 * PI)), np.sin(unit_hue_array * (2.0 * PI))])
+    l_2_array = _ok_l_from_lr_array(hsl_array[2, :, :])
+    cs_array = _get_cs_array(l_2_array, units_ab_array, steps=steps, steps_outer=steps_outer)
     mid = 0.8
     mid_inv = 1.25
-    s_lt_mid_mask = torch.lt(hsl_tensor[1, :, :], mid)
-    t_tensor = torch.where(
+    s_lt_mid_mask = hsl_array[1, :, :] < mid
+    t_array = np.where(s_lt_mid_mask, hsl_array[1, :, :] * mid_inv, (hsl_array[1, :, :] - mid) / (1.0 - mid))
+    k_1_array = np.where(
         s_lt_mid_mask,
-        torch.mul(hsl_tensor[1, :, :], mid_inv),
-        torch.div(torch.sub(hsl_tensor[1, :, :], mid), 1.0 - mid),
+        cs_array[0, :, :] * mid,
+        ((np.power(cs_array[1, :, :], 2.0) * mid_inv**2.0) * (1.0 - mid)) / cs_array[0, :, :],
     )
-    k_1_tensor = torch.where(
+    k_2_array = np.where(
         s_lt_mid_mask,
-        torch.mul(cs_tensor[0, :, :], mid),
-        torch.div(
-            torch.mul(torch.mul(torch.pow(cs_tensor[1, :, :], 2.0), mid_inv**2.0), 1.0 - mid), cs_tensor[0, :, :]
-        ),
+        (k_1_array / cs_array[1, :, :]) * -1.0 + 1.0,
+        (k_1_array / (cs_array[2, :, :] - cs_array[1, :, :])) * -1.0 + 1.0,
     )
-    k_2_tensor = torch.where(
-        s_lt_mid_mask,
-        torch.add(torch.mul(torch.div(k_1_tensor, cs_tensor[1, :, :]), -1.0), 1.0),
-        torch.add(torch.mul(torch.div(k_1_tensor, torch.sub(cs_tensor[2, :, :], cs_tensor[1, :, :])), -1.0), 1.0),
-    )
-    c_tensor = torch.div(
-        torch.mul(t_tensor, k_1_tensor), torch.add(torch.mul(torch.mul(k_2_tensor, t_tensor), -1.0), 1.0)
-    )
-    c_tensor = torch.where(s_lt_mid_mask, c_tensor, torch.add(cs_tensor[1, :, :], c_tensor))
-    rgb_tensor = torch.where(
+    c_array = (t_array * k_1_array) / ((k_2_array * t_array) * -1.0 + 1.0)
+    c_array = np.where(s_lt_mid_mask, c_array, cs_array[1, :, :] + c_array)
+    rgb_array = np.where(
         calc_rgb_mask,
         linear_srgb_from_oklab(
-            torch.stack(
-                [l_tensor, torch.mul(c_tensor, units_ab_tensor[0, :, :]), torch.mul(c_tensor, units_ab_tensor[1, :, :])]
-            )
+            np.stack([l_2_array, c_array * units_ab_array[0, :, :], c_array * units_ab_array[1, :, :]])
         ),
-        rgb_tensor,
+        rgb_array,
     )
-    rgb_tensor = srgb_from_linear_srgb(gamut_clip_tensor(rgb_tensor, alpha=alpha, steps=steps, steps_outer=steps_outer))
-    return torch.where(torch.isnan(rgb_tensor), 0.0, rgb_tensor).clamp(0.0, 1.0)
+    rgb_array = srgb_from_linear_srgb(gamut_clip_tensor(rgb_array, alpha=alpha, steps=steps, steps_outer=steps_outer))
+    return np.clip(np.where(np.isnan(rgb_array), 0.0, rgb_array), 0.0, 1.0)
 
 
-def okhsl_from_srgb(rgb_tensor: torch.Tensor, steps: int = 1, steps_outer: int = 1) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor to Okhsl, with hue in degrees."""
+def okhsl_from_srgb(rgb_array: np.ndarray, steps: int = 1, steps_outer: int = 1) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array to Okhsl, with hue in degrees."""
 
-    rgb_tensor = _require_color_tensor(rgb_tensor)
-    lab_tensor = oklab_from_linear_srgb(linear_srgb_from_srgb(rgb_tensor))
-    c_tensor = torch.sqrt(torch.add(torch.pow(lab_tensor[1, :, :], 2.0), torch.pow(lab_tensor[2, :, :], 2.0)))
-    units_ab_tensor = torch.stack([torch.div(lab_tensor[1, :, :], c_tensor), torch.div(lab_tensor[2, :, :], c_tensor)])
-    h_tensor = torch.add(
-        torch.div(
-            torch.mul(torch.atan2(torch.mul(lab_tensor[2, :, :], -1.0), torch.mul(lab_tensor[1, :, :], -1.0)), 0.5), PI
-        ),
-        0.5,
-    )
-    cs_tensor = _get_cs_tensor(lab_tensor[0, :, :], units_ab_tensor, steps=steps, steps_outer=steps_outer)
+    rgb_array = _require_color_array(rgb_array)
+    lab_array = oklab_from_linear_srgb(linear_srgb_from_srgb(rgb_array))
+    c_array = np.sqrt(np.power(lab_array[1, :, :], 2.0) + np.power(lab_array[2, :, :], 2.0))
+    units_ab_array = np.stack([lab_array[1, :, :] / c_array, lab_array[2, :, :] / c_array])
+    h_array = np.arctan2(lab_array[2, :, :] * -1.0, lab_array[1, :, :] * -1.0) * 0.5 / PI + 0.5
+    cs_array = _get_cs_array(lab_array[0, :, :], units_ab_array, steps=steps, steps_outer=steps_outer)
     mid = 0.8
     mid_inv = 1.25
-    c_lt_c_mid_mask = torch.lt(c_tensor, cs_tensor[1, :, :])
-    k_1_tensor = torch.where(
+    c_lt_c_mid_mask = c_array < cs_array[1, :, :]
+    k_1_array = np.where(
         c_lt_c_mid_mask,
-        torch.mul(cs_tensor[0, :, :], mid),
-        torch.div(torch.mul(torch.mul(torch.pow(cs_tensor[1, :, :], 2.0), mid_inv**2), 1.0 - mid), cs_tensor[0, :, :]),
+        cs_array[0, :, :] * mid,
+        ((np.power(cs_array[1, :, :], 2.0) * mid_inv**2) * (1.0 - mid)) / cs_array[0, :, :],
     )
-    k_2_tensor = torch.where(
+    k_2_array = np.where(
         c_lt_c_mid_mask,
-        torch.add(torch.mul(torch.div(k_1_tensor, cs_tensor[1, :, :]), -1.0), 1.0),
-        torch.add(torch.mul(torch.div(k_1_tensor, torch.sub(cs_tensor[2, :, :], cs_tensor[1, :, :])), -1.0), 1.0),
+        (k_1_array / cs_array[1, :, :]) * -1.0 + 1.0,
+        (k_1_array / (cs_array[2, :, :] - cs_array[1, :, :])) * -1.0 + 1.0,
     )
-    t_tensor = torch.where(
+    t_array = np.where(
         c_lt_c_mid_mask,
-        torch.div(c_tensor, torch.add(k_1_tensor, torch.mul(k_2_tensor, c_tensor))),
-        torch.div(
-            torch.sub(c_tensor, cs_tensor[1, :, :]),
-            torch.add(k_1_tensor, torch.mul(k_2_tensor, torch.sub(c_tensor, cs_tensor[1, :, :]))),
+        c_array / (k_1_array + k_2_array * c_array),
+        (c_array - cs_array[1, :, :]) / (k_1_array + k_2_array * (c_array - cs_array[1, :, :])),
+    )
+    s_array = np.where(c_lt_c_mid_mask, t_array * mid, t_array * (1.0 - mid) + mid)
+    l_array = _ok_l_r_from_l_array(lab_array[0, :, :])
+    hsl_array = np.stack([_degrees_from_unit_hue(h_array), s_array, l_array])
+    hsl_array = np.where(np.isnan(hsl_array), 0.0, hsl_array)
+    hsl_array[1:, ...] = np.clip(hsl_array[1:, ...], 0.0, 1.0)
+    return hsl_array
+
+
+def hsl_from_srgb(rgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW gamma-corrected sRGB array to HSL, with hue in degrees."""
+
+    rgb_array = _require_color_array(rgb_array)
+    c_max_array = rgb_array.max(axis=0)
+    c_min_array = rgb_array.min(axis=0)
+    c_sum_array = c_max_array + c_min_array
+    c_range_array = c_max_array - c_min_array
+    l_array = c_sum_array / 2.0
+    s_array = np.where(
+        c_max_array == c_min_array,
+        0.0,
+        np.where(
+            l_array < 0.5,
+            c_range_array / c_sum_array,
+            c_range_array / ((c_max_array + c_min_array) * -1.0 + 2.0),
         ),
     )
-    s_tensor = torch.where(c_lt_c_mid_mask, torch.mul(t_tensor, mid), torch.add(torch.mul(t_tensor, 1.0 - mid), mid))
-    l_tensor = _ok_l_r_from_l_tensor(lab_tensor[0, :, :])
-    hsl_tensor = torch.stack([_degrees_from_unit_hue(h_tensor), s_tensor, l_tensor])
-    hsl_tensor = torch.where(torch.isnan(hsl_tensor), 0.0, hsl_tensor)
-    hsl_tensor[1:, ...] = hsl_tensor[1:, ...].clamp(0.0, 1.0)
-    return hsl_tensor
-
-
-def hsl_from_srgb(rgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW gamma-corrected sRGB tensor to HSL, with hue in degrees."""
-
-    rgb_tensor = _require_color_tensor(rgb_tensor)
-    c_max_tensor = rgb_tensor.max(0).values
-    c_min_tensor = rgb_tensor.min(0).values
-    c_sum_tensor = torch.add(c_max_tensor, c_min_tensor)
-    c_range_tensor = torch.sub(c_max_tensor, c_min_tensor)
-    l_tensor = torch.div(c_sum_tensor, 2.0)
-    s_tensor = torch.where(
-        torch.eq(c_max_tensor, c_min_tensor),
+    rgb_c_array = (c_max_array - rgb_array) / c_range_array
+    h_array = np.where(
+        c_max_array == c_min_array,
         0.0,
-        torch.where(
-            torch.lt(l_tensor, 0.5),
-            torch.div(c_range_tensor, c_sum_tensor),
-            torch.div(c_range_tensor, torch.add(torch.mul(torch.add(c_max_tensor, c_min_tensor), -1.0), 2.0)),
-        ),
-    )
-    rgb_c_tensor = torch.div(
-        torch.sub(c_max_tensor.expand(rgb_tensor.shape), rgb_tensor), c_range_tensor.expand(rgb_tensor.shape)
-    )
-    h_tensor = torch.where(
-        torch.eq(c_max_tensor, c_min_tensor),
-        0.0,
-        torch.where(
-            torch.eq(rgb_tensor[0, :, :], c_max_tensor),
-            torch.sub(rgb_c_tensor[2, :, :], rgb_c_tensor[1, :, :]),
-            torch.where(
-                torch.eq(rgb_tensor[1, :, :], c_max_tensor),
-                torch.add(torch.sub(rgb_c_tensor[0, :, :], rgb_c_tensor[2, :, :]), 2.0),
-                torch.add(torch.sub(rgb_c_tensor[1, :, :], rgb_c_tensor[0, :, :]), 4.0),
+        np.where(
+            rgb_array[0, :, :] == c_max_array,
+            rgb_c_array[2, :, :] - rgb_c_array[1, :, :],
+            np.where(
+                rgb_array[1, :, :] == c_max_array,
+                (rgb_c_array[0, :, :] - rgb_c_array[2, :, :]) + 2.0,
+                (rgb_c_array[1, :, :] - rgb_c_array[0, :, :]) + 4.0,
             ),
         ),
     )
-    h_tensor = _degrees_from_unit_hue(torch.remainder(torch.div(h_tensor, 6.0), 1.0))
-    return torch.stack([h_tensor, s_tensor, l_tensor])
+    h_array = _degrees_from_unit_hue(np.remainder(h_array / 6.0, 1.0))
+    return np.stack([h_array, s_array, l_array])
 
 
-def srgb_from_hsl(hsl_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW HSL tensor, with hue in degrees, to gamma-corrected sRGB."""
+def srgb_from_hsl(hsl_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW HSL array, with hue in degrees, to gamma-corrected sRGB."""
 
-    hsl_tensor = _require_color_tensor(hsl_tensor)
-    hsl_tensor = hsl_tensor.clone()
-    hsl_tensor[1:, ...] = hsl_tensor[1:, ...].clamp(0.0, 1.0)
-    rgb_tensor = torch.empty_like(hsl_tensor)
-    s_0_mask = torch.eq(hsl_tensor[1, :, :], 0.0)
-    rgb_tensor = torch.where(
-        s_0_mask.expand(rgb_tensor.shape), hsl_tensor[2, :, :].expand(hsl_tensor.shape), rgb_tensor
+    hsl_array = _require_color_array(hsl_array)
+    hsl_array = hsl_array.copy()
+    hsl_array[1:, ...] = np.clip(hsl_array[1:, ...], 0.0, 1.0)
+    rgb_array = np.empty_like(hsl_array)
+    s_0_mask = hsl_array[1, :, :] == 0.0
+    rgb_array = np.where(s_0_mask, hsl_array[2, :, :], rgb_array)
+    m2_array = np.where(
+        hsl_array[2, :, :] <= 0.5,
+        hsl_array[2, :, :] * (hsl_array[1, :, :] + 1.0),
+        (hsl_array[2, :, :] + hsl_array[1, :, :]) - hsl_array[2, :, :] * hsl_array[1, :, :],
     )
-    m2_tensor = torch.where(
-        torch.le(hsl_tensor[2, :, :], 0.5),
-        torch.mul(hsl_tensor[2, :, :], torch.add(hsl_tensor[1, :, :], 1.0)),
-        torch.sub(
-            torch.add(hsl_tensor[2, :, :], hsl_tensor[1, :, :]), torch.mul(hsl_tensor[2, :, :], hsl_tensor[1, :, :])
-        ),
-    )
-    m1_tensor = torch.sub(torch.mul(hsl_tensor[2, :, :], 2.0), m2_tensor)
-    unit_hue_tensor = _unit_hue_from_degrees(hsl_tensor[0, :, :])
+    m1_array = hsl_array[2, :, :] * 2.0 - m2_array
+    unit_hue_array = _unit_hue_from_degrees(hsl_array[0, :, :])
 
-    def hsl_values(m1_tensor: torch.Tensor, m2_tensor: torch.Tensor, h_tensor: torch.Tensor) -> torch.Tensor:
-        h_tensor = torch.remainder(h_tensor, 1.0)
-        result_tensor = m1_tensor.clone()
-        return torch.where(
-            torch.lt(h_tensor, 1.0 / 6.0),
-            torch.add(m1_tensor, torch.mul(torch.sub(m2_tensor, m1_tensor), torch.mul(h_tensor, 6.0))),
-            torch.where(
-                torch.lt(h_tensor, 0.5),
-                m2_tensor,
-                torch.where(
-                    torch.lt(h_tensor, 2.0 / 3.0),
-                    torch.add(
-                        m1_tensor,
-                        torch.mul(
-                            torch.sub(m2_tensor, m1_tensor),
-                            torch.mul(torch.add(torch.mul(h_tensor, -1.0), 2.0 / 3.0), 6.0),
-                        ),
-                    ),
-                    result_tensor,
+    def hsl_values(m1_array: np.ndarray, m2_array: np.ndarray, h_array: np.ndarray) -> np.ndarray:
+        h_array = np.remainder(h_array, 1.0)
+        result_array = m1_array.copy()
+        return np.where(
+            h_array < 1.0 / 6.0,
+            m1_array + (m2_array - m1_array) * (h_array * 6.0),
+            np.where(
+                h_array < 0.5,
+                m2_array,
+                np.where(
+                    h_array < 2.0 / 3.0,
+                    m1_array + (m2_array - m1_array) * ((h_array * -1.0 + 2.0 / 3.0) * 6.0),
+                    result_array,
                 ),
             ),
         )
 
-    return torch.stack(
+    return np.stack(
         [
-            hsl_values(m1_tensor, m2_tensor, torch.add(unit_hue_tensor, 1.0 / 3.0)),
-            hsl_values(m1_tensor, m2_tensor, unit_hue_tensor),
-            hsl_values(m1_tensor, m2_tensor, torch.sub(unit_hue_tensor, 1.0 / 3.0)),
+            hsl_values(m1_array, m2_array, unit_hue_array + 1.0 / 3.0),
+            hsl_values(m1_array, m2_array, unit_hue_array),
+            hsl_values(m1_array, m2_array, unit_hue_array - 1.0 / 3.0),
         ]
     )
 
 
-def hsl_from_linear_srgb(linear_srgb_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW linear-light sRGB tensor directly to HSL, with hue in degrees."""
+def hsl_from_linear_srgb(linear_srgb_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW linear-light sRGB array directly to HSL, with hue in degrees."""
 
-    linear_srgb_tensor = _require_color_tensor(linear_srgb_tensor)
-    return hsl_from_srgb(srgb_from_linear_srgb(linear_srgb_tensor))
+    linear_srgb_array = _require_color_array(linear_srgb_array)
+    return hsl_from_srgb(srgb_from_linear_srgb(linear_srgb_array))
 
 
-def linear_srgb_from_hsl(hsl_tensor: torch.Tensor) -> torch.Tensor:
-    """Convert a 3xHxW HSL tensor, with hue in degrees, directly to linear-light sRGB."""
+def linear_srgb_from_hsl(hsl_array: np.ndarray) -> np.ndarray:
+    """Convert a 3xHxW HSL array, with hue in degrees, directly to linear-light sRGB."""
 
-    hsl_tensor = _require_color_tensor(hsl_tensor)
-    return linear_srgb_from_srgb(srgb_from_hsl(hsl_tensor))
+    hsl_array = _require_color_array(hsl_array)
+    return linear_srgb_from_srgb(srgb_from_hsl(hsl_array))

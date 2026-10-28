@@ -6,10 +6,12 @@ import re
 import socket
 import sys
 from pathlib import Path
-
-import torch
+from typing import TYPE_CHECKING
 
 from invokeai.app.services.config.config_default import ATTENTION_BACKEND
+
+if TYPE_CHECKING:
+    import torch
 
 
 def find_open_port(port: int) -> int:
@@ -31,6 +33,8 @@ def describe_torch_build() -> str:
     `device.type == "cuda"`, so the device line alone does not say what is actually running; a bug
     report needs the version string, the accelerator API and the CPU architecture.
     """
+    import torch
+
     if torch.version.hip is not None:
         accelerator = f"HIP {torch.version.hip}"
     elif torch.version.cuda is not None:
@@ -42,6 +46,8 @@ def describe_torch_build() -> str:
 
 def check_cudnn(logger: logging.Logger) -> None:
     """Check for cuDNN issues that could be causing degraded performance."""
+    import torch
+
     if torch.backends.cudnn.is_available():
         try:
             # Note: At the time of writing (torch 2.2.1), torch.backends.cudnn.version() only raises an error the first
@@ -78,6 +84,8 @@ def check_cuda_build_compatibility(logger: logging.Logger) -> None:
     generation looks hung. A GPU older than the build's lowest architecture passes `is_available()` and then fails
     at the first kernel launch.
     """
+    import torch
+
     if torch.version.cuda is None or torch.version.hip is not None:
         return
     if not torch.cuda.is_available():
@@ -112,7 +120,7 @@ _PROBE_SEQ_LEN = 1024
 _PROBE_HEAD_DIM = 128
 
 
-def probe_attention_backends(device: torch.device) -> dict[str, bool] | None:
+def probe_attention_backends(device: "torch.device") -> dict[str, bool] | None:
     """Which fused SDPA backends this build and device can actually use.
 
     Availability is not a property of the torch version alone: ROCm builds have no cuDNN attention,
@@ -129,6 +137,8 @@ def probe_attention_backends(device: torch.device) -> dict[str, bool] | None:
     would park a context on an idle server, and on `cuda:0` rather than on a configured
     `generation_devices` entry.
     """
+    import torch
+
     if device.type != "cuda":
         return None
     try:
@@ -172,7 +182,7 @@ def probe_attention_backends(device: torch.device) -> dict[str, bool] | None:
 _logged_attention_backends: set[str] = set()
 
 
-def log_attention_backends(logger: logging.Logger, device: torch.device) -> None:
+def log_attention_backends(logger: logging.Logger, device: "torch.device") -> None:
     """Log this device's SDPA backend availability, once per device.
 
     The point is support: a question about attention performance can then be answered by reading a
@@ -220,7 +230,14 @@ def enable_dev_reload(custom_nodes_path=None) -> None:
 
 
 def apply_monkeypatches(attention_backend: ATTENTION_BACKEND = "auto") -> None:
-    """Apply monkeypatches to fix issues with third-party libraries, and install the configured attention backend."""
+    """Apply monkeypatches to fix issues with third-party libraries, and install the configured attention backend.
+
+    Every patch here wraps torch; in an API-only install without torch there is nothing to patch, so skip.
+    """
+    try:
+        import torch  # noqa: F401 (presence check — the patches below import it through their own modules)
+    except ImportError:
+        return
 
     import invokeai.backend.util.hotfixes  # noqa: F401 (monkeypatching on import)
 

@@ -73,7 +73,6 @@ from invokeai.app.invocations.primitives import (
     StringCollectionOutput,
     StringOutput,
 )
-from invokeai.app.invocations.scheduler import SchedulerOutput
 from invokeai.app.services.boards.boards_common import BoardDTO
 from invokeai.app.services.config.config_default import InvokeAIAppConfig
 from invokeai.app.services.image_records.image_records_common import ImageCategory
@@ -120,7 +119,6 @@ from invokeai.backend.image_util.color_conversion import (
     xyz_from_srgb,
 )
 from invokeai.backend.model_manager.configs.factory import AnyModelConfig, ModelConfigFactory
-from invokeai.backend.model_manager.load.load_base import LoadedModel
 from invokeai.backend.model_manager.taxonomy import (
     BaseModelType,
     ClipVariantType,
@@ -152,8 +150,6 @@ from invokeai.backend.stable_diffusion.diffusion.conditioning_data import (
     WanConditioningInfo,
     ZImageConditioningInfo,
 )
-from invokeai.backend.stable_diffusion.schedulers.schedulers import SCHEDULER_NAME_VALUES
-from invokeai.backend.util.devices import CPU_DEVICE, CUDA_DEVICE, MPS_DEVICE, choose_precision, choose_torch_device
 from invokeai.version import __version__
 
 __all__ = [
@@ -258,19 +254,9 @@ __all__ = [
     "WorkflowWithoutID",
     # invokeai.app.services.config.config_default
     "InvokeAIAppConfig",
-    # invokeai.backend.model_management.model_manager
-    "LoadedModel",
     # invokeai.backend.model_management.models.base
-    # invokeai.backend.stable_diffusion.schedulers.schedulers
-    "SCHEDULER_NAME_VALUES",
     # invokeai.version
     "__version__",
-    # invokeai.backend.util.devices
-    "choose_precision",
-    "choose_torch_device",
-    "CPU_DEVICE",
-    "CUDA_DEVICE",
-    "MPS_DEVICE",
     # invokeai.app.util.misc
     "SEED_MAX",
     "get_random_seed",

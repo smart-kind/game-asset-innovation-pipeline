@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any, Callable, Generator, Iterator, NamedTuple, Optional
 
 import numpy as np
-import psutil
 from PIL import Image
 
 from invokeai.app.services.session_processor.session_processor_common import CanceledException
@@ -95,6 +94,8 @@ def _spawn_worker(*args: str, **kwargs: Any) -> subprocess.Popen[Any]:
 
 
 def _is_process_running(pid: int) -> bool:
+    import psutil
+
     """Returns whether a process exists and is not a zombie."""
     try:
         process = psutil.Process(pid)
@@ -117,6 +118,8 @@ def _terminate_process_tree(proc: subprocess.Popen[Any]) -> None:
 
 
 def _worker_tree_rss(proc: subprocess.Popen[Any]) -> int:
+    import psutil
+
     """Returns resident memory used by the worker and its decoder children."""
     try:
         worker = psutil.Process(proc.pid)

@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optiona
 from urllib.parse import urljoin, urlparse
 
 import requests
-import torch
 import yaml
 from huggingface_hub import constants as hf_constants
 from huggingface_hub import get_token as hf_get_token
@@ -99,7 +98,6 @@ from invokeai.backend.model_manager.taxonomy import (
 from invokeai.backend.model_manager.util.lora_metadata_extractor import apply_lora_metadata
 from invokeai.backend.util import InvokeAILogger
 from invokeai.backend.util.catch_sigint import catch_sigint
-from invokeai.backend.util.devices import TorchDevice
 from invokeai.backend.util.util import slugify
 
 if TYPE_CHECKING:
@@ -2062,6 +2060,13 @@ class ModelInstallService(ModelInstallServiceBase):
 
     def _guess_variant(self) -> Optional[ModelRepoVariant]:
         """Guess the best HuggingFace variant type to download."""
+        try:
+            from invokeai.backend.util.devices import TorchDevice
+        except ImportError:
+            # API-only build: no torch to pick a compute dtype from, so take the repo default.
+            return None
+        import torch
+
         precision = TorchDevice.choose_torch_dtype()
         return ModelRepoVariant.FP16 if precision == torch.float16 else None
 

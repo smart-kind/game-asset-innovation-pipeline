@@ -3,10 +3,10 @@
 import subprocess
 from typing import Any
 
-import psutil
-
 
 def kill_process_tree(proc: subprocess.Popen[Any]) -> None:
+    import psutil
+
     """Kill ``proc`` and its descendants, then reap them.
 
     A command can do its work in a child: the ffmpeg on ``PATH`` (Windows ARM64, where

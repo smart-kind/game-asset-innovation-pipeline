@@ -29,8 +29,6 @@ if TYPE_CHECKING:
     from invokeai.app.services.gallery.gallery_base import GalleryServiceABC
     from invokeai.app.services.gallery_maintenance.gallery_maintenance_default import GalleryMaintenanceService
     from invokeai.app.services.image_files.image_files_base import ImageFileStorageBase
-    from invokeai.app.services.image_index.image_index_base import ImageIndexServiceBase
-    from invokeai.app.services.image_index.image_index_records_base import ImageIndexRecordsBase
     from invokeai.app.services.image_moves.image_moves_default import ImageMoveService
     from invokeai.app.services.image_records.image_records_base import ImageRecordStorageBase
     from invokeai.app.services.images.images_base import ImageServiceABC
@@ -56,7 +54,7 @@ if TYPE_CHECKING:
     from invokeai.app.services.videos.videos_base import VideoServiceABC
     from invokeai.app.services.workflow_records.workflow_records_base import WorkflowRecordsStorageBase
     from invokeai.app.services.workflow_thumbnails.workflow_thumbnails_base import WorkflowThumbnailServiceBase
-    from invokeai.backend.stable_diffusion.diffusion.conditioning_data import ConditioningFieldData
+    from invokeai.app.services.object_serializer.conditioning_null import ConditioningFieldData
 
 
 def _default_progress_previews() -> "ProgressPreviewsBase":
@@ -110,8 +108,6 @@ class InvocationServices:
         video_records: "VideoRecordStorageBase",
         board_video_records: "BoardVideoRecordStorageBase",
         gallery: "GalleryServiceABC",
-        image_index_records: "ImageIndexRecordsBase",
-        image_index: "ImageIndexServiceBase",
         intermediates: "IntermediatesServiceBase",
         image_moves: "ImageMoveService | None" = None,
         progress_previews: "ProgressPreviewsBase | None" = None,
@@ -165,8 +161,6 @@ class InvocationServices:
         self.video_records = video_records
         self.board_video_records = board_video_records
         self.gallery = gallery
-        self.image_index_records = image_index_records
-        self.image_index = image_index
         self.fonts = fonts
         self.intermediates = intermediates
         self.gallery_maintenance = gallery_maintenance

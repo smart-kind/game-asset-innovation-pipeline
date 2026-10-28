@@ -1,7 +1,6 @@
 from math import ceil, floor, sqrt
 from typing import Optional
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -86,6 +85,7 @@ def np_to_pil(image: np.ndarray) -> Image.Image:
 
 def pil_to_cv2(image: Image.Image) -> np.ndarray:
     """Converts a PIL image to a CV2 image."""
+    import cv2
 
     if image.mode == "RGBA":
         return cv2.cvtColor(np.array(image, dtype=np.uint8), cv2.COLOR_RGBA2BGRA)
@@ -95,6 +95,7 @@ def pil_to_cv2(image: Image.Image) -> np.ndarray:
 
 def cv2_to_pil(image: np.ndarray) -> Image.Image:
     """Converts a CV2 image to a PIL image."""
+    import cv2
 
     if image.ndim == 3 and image.shape[2] == 4:
         return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA))
@@ -149,6 +150,8 @@ def resize_image_to_resolution(input_image: np.ndarray, resolution: int) -> np.n
     Returns:
         The resized image.
     """
+    import cv2
+
     h = float(input_image.shape[0])
     w = float(input_image.shape[1])
     scaling_factor = float(resolution) / min(h, w)
@@ -184,6 +187,8 @@ def nms(np_img: np.ndarray, threshold: Optional[int] = None, sigma: Optional[flo
     # Raise a value error if only one of threshold and sigma is provided
     if (threshold is None) != (sigma is None):
         raise ValueError("Both threshold and sigma must be provided if one is provided.")
+
+    import cv2
 
     if sigma is not None and threshold is not None:
         # Blurring the image can help to thin out features
@@ -229,6 +234,7 @@ def safe_step(x: np.ndarray, step: int = 2) -> np.ndarray:
 
 def resize_to_multiple(image: np.ndarray, multiple: int) -> np.ndarray:
     """Resize an image to make its dimensions multiples of the given number."""
+    import cv2
 
     # Get the original dimensions
     height, width = image.shape[:2]

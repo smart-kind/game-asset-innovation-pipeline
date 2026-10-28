@@ -1,11 +1,13 @@
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from invokeai.backend.model_manager.configs.base import Config_Base
 from invokeai.backend.model_manager.configs.identification_utils import NotAMatchError
-from invokeai.backend.model_manager.model_on_disk import ModelOnDisk
 from invokeai.backend.model_manager.taxonomy import BaseModelType, ModelFormat, ModelSourceType, ModelType
+
+if TYPE_CHECKING:
+    from invokeai.backend.model_manager.model_on_disk import ModelOnDisk
 
 ExternalGenerationMode = Literal["txt2img", "img2img", "inpaint"]
 ExternalMaskFormat = Literal["alpha", "binary", "none"]
@@ -109,5 +111,5 @@ class ExternalApiModelConfig(Config_Base):
         return self
 
     @classmethod
-    def from_model_on_disk(cls, mod: ModelOnDisk, override_fields: dict[str, object]) -> Self:
+    def from_model_on_disk(cls, mod: "ModelOnDisk", override_fields: dict[str, object]) -> Self:
         raise NotAMatchError("external API models are not probed from disk")

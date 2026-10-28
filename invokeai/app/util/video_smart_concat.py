@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, TypeAlias
 
-import imageio_ffmpeg
 import numpy as np
 
 from invokeai.app.services.session_processor.session_processor_common import CanceledException
@@ -348,6 +347,8 @@ def encode_rgb_frames(
     timeout: float = 600,
 ) -> int:
     """Stream RGB frames to bounded, cancellable bundled FFmpeg H.264 encoding."""
+    import imageio_ffmpeg
+
     width, height = canvas
     command = [
         imageio_ffmpeg.get_ffmpeg_exe(),

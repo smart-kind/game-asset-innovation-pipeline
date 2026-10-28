@@ -13,13 +13,16 @@ session names stay, so an encoder or VAE that two architectures share (Qwen3 4B 
 FLUX.1 autoencoder for Z-Image) is not reloaded.
 """
 
-from typing import Any, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Optional
 
 from pydantic import BaseModel
 
 from invokeai.app.invocations.model import ModelIdentifierField
 from invokeai.app.services.shared.graph_validation import Graph
-from invokeai.backend.model_manager.load.model_cache.model_cache import ModelCache
+
+if TYPE_CHECKING:
+    from invokeai.backend.model_manager.load.model_cache.model_cache import ModelCache
+
 from invokeai.backend.model_manager.taxonomy import BaseModelType, ModelType
 from invokeai.backend.util.logging import InvokeAILogger
 
@@ -51,7 +54,7 @@ class ArchitectureSwitchOffload:
     def __init__(self) -> None:
         self._last_bases: Optional[frozenset[BaseModelType]] = None
 
-    def before_session(self, graph: Graph, cache: ModelCache) -> int:
+    def before_session(self, graph: Graph, cache: "ModelCache") -> int:
         """Offload what `graph` does not name if its architecture differs from the last session's. Returns bytes freed.
 
         A session that names no main model (an upscale, a utility workflow) decides nothing and leaves the last

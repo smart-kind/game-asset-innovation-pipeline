@@ -14,7 +14,6 @@ from pydantic import BaseModel, ConfigDict, Field, Tag, field_validator
 from pydantic_core import PydanticUndefined
 
 from invokeai.app.util.misc import uuid_string
-from invokeai.backend.model_manager.model_on_disk import ModelOnDisk
 from invokeai.backend.model_manager.taxonomy import (
     AnyVariant,
     BaseModelType,
@@ -25,7 +24,7 @@ from invokeai.backend.model_manager.taxonomy import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from invokeai.backend.model_manager.model_on_disk import ModelOnDisk
 
 
 class Config_Base(ABC, BaseModel):
@@ -211,7 +210,7 @@ class Config_Base(ABC, BaseModel):
 
     @classmethod
     @abstractmethod
-    def from_model_on_disk(cls, mod: ModelOnDisk, override_fields: dict[str, Any]) -> Self:
+    def from_model_on_disk(cls, mod: "ModelOnDisk", override_fields: dict[str, Any]) -> Self:
         """Given the model on disk and any override fields, attempt to construct an instance of this config class.
 
         This method serves to identify whether the model on disk matches this config class, and if so, to extract any
@@ -237,7 +236,7 @@ class Diffusers_Config_Base(ABC, BaseModel):
     repo_variant: ModelRepoVariant = Field(ModelRepoVariant.Default)
 
     @classmethod
-    def _get_repo_variant_or_raise(cls, mod: ModelOnDisk) -> ModelRepoVariant:
+    def _get_repo_variant_or_raise(cls, mod: "ModelOnDisk") -> ModelRepoVariant:
         # get all files ending in .bin or .safetensors
         weight_files = list(mod.path.glob("**/*.safetensors"))
         weight_files.extend(list(mod.path.glob("**/*.bin")))

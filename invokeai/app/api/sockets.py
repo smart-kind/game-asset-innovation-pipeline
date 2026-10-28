@@ -23,10 +23,6 @@ from invokeai.app.services.events.events_common import (
     DownloadProgressEvent,
     DownloadStartedEvent,
     FastAPIEvent,
-    ImageIndexEventBase,
-    ImageIndexStatusEvent,
-    ImageIndexUpdatedEvent,
-    ImageMapProjectionReadyEvent,
     ImageUploadedEvent,
     IntermediatesEventBase,
     IntermediatesOperationChangedEvent,
@@ -138,7 +134,6 @@ BULK_DOWNLOAD_EVENTS = {BulkDownloadStartedEvent, BulkDownloadCompleteEvent, Bul
 WORKFLOW_EVENTS = {WorkflowCreatedEvent, WorkflowUpdatedEvent, WorkflowDeletedEvent}
 USER_EVENTS = {UserAccessChangedEvent}
 
-IMAGE_INDEX_EVENTS = {ImageIndexStatusEvent, ImageIndexUpdatedEvent, ImageMapProjectionReadyEvent}
 INTERMEDIATES_EVENTS = {IntermediatesOperationChangedEvent}
 MEDIA_EVENTS = {ImageUploadedEvent, VideoUploadedEvent}
 
@@ -249,7 +244,6 @@ class SocketIO:
         register_events(BULK_DOWNLOAD_EVENTS, self._handle_bulk_image_download_event)
         register_events(LLM_TASK_EVENTS, self._handle_llm_task_event)
         register_events(WORKFLOW_EVENTS, self._handle_workflow_event)
-        register_events(IMAGE_INDEX_EVENTS, self._handle_image_index_event)
         register_events(INTERMEDIATES_EVENTS, self._handle_intermediates_event)
         register_events(MEDIA_EVENTS, self._handle_media_event)
         register_events(USER_EVENTS, self._handle_user_access_changed)
@@ -1229,27 +1223,6 @@ class SocketIO:
         user_room = f"user:{event_data.user_id}"
         payload = event_data.model_dump(mode="json")
         await self._sio.emit(event=event_name, data=payload, room=[user_room, "admin"])
-
-    async def _handle_image_index_event(self, event: FastAPIEvent[ImageIndexEventBase]) -> None:
-        event_name, event_data = event
-        # The counts-free per-user poke goes to the owning user's room only —
-        # admins learn the same thing from the status event below.
-        if isinstance(event_data, ImageIndexUpdatedEvent):
-            await self._sio.emit(
-                event=event_name, data=event_data.model_dump(mode="json"), room=f"user:{event_data.user_id}"
-            )
-            return
-        # Projection-ready events go to the owning user's room plus admins.
-        if isinstance(event_data, ImageMapProjectionReadyEvent):
-            # Single emit with a room list: python-socketio dedupes, so an
-            # admin viewing their own map gets exactly one event.
-            rooms = [f"user:{event_data.user_id}", "admin"]
-            await self._sio.emit(event=event_name, data=event_data.model_dump(mode="json"), room=rooms)
-            return
-        # Index counts aggregate over ALL users' images; watching them tick is
-        # a side channel on other users' generation activity, so they go to
-        # admins only (single-user mode's sole user is an admin).
-        await self._sio.emit(event=event_name, data=event_data.model_dump(mode="json"), room="admin")
 
     async def _handle_intermediates_event(self, event: FastAPIEvent[IntermediatesEventBase]) -> None:
         event_name, event_data = event

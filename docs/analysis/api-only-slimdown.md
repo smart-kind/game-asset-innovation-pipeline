@@ -113,6 +113,16 @@ uv run --no-sync pytest tests/app/routers/test_app_info.py         # external pr
 3. **model_manager 磁盘扫描探测本地格式**：对本地 checkpoint 格式的 disk probing 在对应 loader/格式模块被删后，可能因引用缺失目录或类而抛异常，需要把扫描范围收窄到 external + `Unknown_Config` 兜底路径。
 4. **Docker 构建链**：当前 `docker/` 构建会跑 pnpm 同时构建 webv1 与 webv2；API-only 下 webv1 可整体跳过，但若直接删目录而不同步改构建脚本，会在镜像构建阶段失败——两者要同一改动内完成。
 
+## 7. 实施记录（`api-only-slim` 分支，按 §5 四阶段执行）
+
+1. **裁剪依赖声明（§5.1）**：`pyproject.toml` 删除整个「Core generation dependencies」块（accelerate / bitsandbytes / compel / diffusers / gguf / mediapipe / mistral-common / onnx / onnxruntime / opencv / imageio / psutil / safetensors / sentencepiece / spandrel / torch / torchvision / torchsde / transformers 及其平台变体），删除 `xformers` / `cpu` / `cuda` / `rocm` / `mysql` extras 与 `[tool.uv]` 中所有 torch/rocm/nvidia 索引与约束；保留 REST API 应用依赖（fastapi / sqlalchemy / pillow / requests / pypatchmatch 等，pypatchmatch 缺失时优雅降级）。同步处理启动路径耦合：`run_app.py` 删除 torch allocator / ROCm / AOTriton / `TorchDevice` / `resolve_krea2_sdpa_backends` 等启动块；`startup_utils.py` 顶层 `import torch` 改惰性，`apply_monkeypatches` 无 torch 时 early-return；`taxonomy.py` 删除 `AnyModel` TypeAlias 及其 torch/diffusers/onnxruntime 顶层 import（该别名全部引用方都是本地 pipeline 模块，随 §5.3 一并删除）。
+2. **解耦混用目录（§5.2 的前置）**：backend 纯架构目录整体删除；`model_manager` 保留外部链路子集——`model_on_disk.py` 权重读取（safetensors/gguf/quantization loader）改函数内惰性导入，元数据/hash 路径保持无 torch；`configs/` 删除全部本地 config 模块，`factory.py` 的 `AnyModelConfig` Union 收窄为 `ExternalApiModelConfig` + `Unknown_Config`；`starter_models/` 仅保留 `external.py`。`model_load` 默认实现替换为 no-op（`load_model` 抛「API-only build 禁用本地加载」），`model_manager_default.reidentify_model` 仅保留 external 路径（非 external 记录返回 400）。`image_util/` 保留 PIL 纯操作与 `infill_methods`（patchmatch 降级），删除 torch 子模块；`util/devices.py`（`TorchDevice`）删除，`invocation_context` 的引用改惰性 try/except。
+3. **删除 invocations 本地管线（§5.3）**：18 个本地 pipeline 子目录（sd/flux/flux2/wan/ltx2/minimax_h3/anima/krea2/z_image/pid/qwen_image/qwen_image_2_1/ideogram4/ernie_image/sd3/cogview4/vae/text_encoder）整体删除；顶层 torch 依赖文件逐甄别，保留 `external_image_generation.py` 及 torch-free 共享 utilities。`invocations/__init__.py` 的 `load_all_modules()` 动态发现机制不变，删除后仅剩 27 个模块（baseinvocation / fields / image / external_image_generation 等），graph 引擎在精简 invocations 集合上正常注册。
+4. **前端与 Docker（§5.4）**：`webv1` 整体删除；`webv2` 保留（UI 仍可冒烟，后续可决策 headless）。`docker/`：Dockerfile 去 webv1 构建层、去 `GPU_DRIVER` build-arg、去 opencv/patchmatch 编译与 ROCm 软链、`uv sync --frozen`（无 extra）；compose 收为单服务 `invokeai`（无 nvidia/amd runtime）；entrypoint 去 ROCm render-group 与 SSH 段；`.env.sample` 补 `INVOKEAI_EXTERNAL_*_API_KEY` 五项 provider key 说明。
+5. **验证**：slim venv（无 torch/diffusers/safetensors/gguf/onnxruntime）下四组外部测试 558 passed（`tests/app/services/external_generation/` + `test_external_image_generation.py` + `test_app_info.py` + `test_model_manager.py`）；`invokeai.app.api_app` 与 `load_all_modules()` 在无 torch 环境 import 通过；`patchmatch_status` 端点在 pypatchmatch 缺失时优雅返回不可用。
+
+遗留：`docs/` 与 `tests/AGENTS.md` 中提及本地模型的段落未同步（不影响运行）；webv2 UI 中本地模型管理面板仍会显示但功能禁用；`.dev_scripts/` 本地模型回归脚本未删。
+
 ---
 
-*本文档为工程分析，非执行计划；数字与路径以 `analysis/api-only-slim` 分支上的仓库现状为准。*
+*本文档为工程分析，非执行计划；数字与路径以 `analysis/api-only-slim` 分支上的仓库现状为准。§7 为 `api-only-slim` 分支的实施记录。*

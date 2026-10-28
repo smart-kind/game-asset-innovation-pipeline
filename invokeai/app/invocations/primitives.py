@@ -1,6 +1,4 @@
-from typing import Optional
-
-import torch
+from typing import TYPE_CHECKING, Optional
 
 from invokeai.app.invocations.baseinvocation import (
     BaseInvocation,
@@ -41,6 +39,9 @@ from invokeai.app.invocations.fields import (
 from invokeai.app.services.images.images_common import ImageDTO
 from invokeai.app.services.shared.invocation_context import InvocationContext
 from invokeai.app.services.videos.videos_common import VideoDTO
+
+if TYPE_CHECKING:
+    import torch
 
 """
 Primitives: Boolean, Integer, Float, String, Image, Latents, Conditioning, Color
@@ -347,7 +348,7 @@ class LatentsOutput(BaseInvocationOutput):
     height: int = OutputField(description=FieldDescriptions.height)
 
     @classmethod
-    def build(cls, latents_name: str, latents: torch.Tensor, seed: Optional[int] = None) -> "LatentsOutput":
+    def build(cls, latents_name: str, latents: "torch.Tensor", seed: Optional[int] = None) -> "LatentsOutput":
         return cls(
             latents=LatentsField(latents_name=latents_name, seed=seed),
             width=latents.size()[3] * LATENT_SCALE_FACTOR,

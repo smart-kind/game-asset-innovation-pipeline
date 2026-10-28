@@ -2,8 +2,6 @@ import asyncio
 from logging import Logger
 from typing import Optional
 
-import torch
-
 from invokeai.app.services.app_settings import AppSettingsService
 from invokeai.app.services.auth.token_service import set_jwt_secret
 from invokeai.app.services.board_image_records.board_image_records_default import BoardImageRecordStorage
@@ -29,8 +27,6 @@ from invokeai.app.services.fonts.fonts_default import FontService
 from invokeai.app.services.gallery.gallery_default import GalleryService
 from invokeai.app.services.gallery_maintenance.gallery_maintenance_default import GalleryMaintenanceService
 from invokeai.app.services.image_files.image_files_disk import DiskImageFileStorage
-from invokeai.app.services.image_index.image_index_default import ImageIndexService, warm_up_attention
-from invokeai.app.services.image_index.image_index_records_default import ImageIndexRecords
 from invokeai.app.services.image_moves.image_moves_default import ImageMoveService
 from invokeai.app.services.image_records.image_records_default import ImageRecordStorage
 from invokeai.app.services.images.images_default import ImageService
@@ -50,6 +46,7 @@ from invokeai.app.services.model_relationships.model_relationships_default impor
 from invokeai.app.services.names.names_default import SimpleNameService
 from invokeai.app.services.object_serializer.object_serializer_disk import ObjectSerializerDisk
 from invokeai.app.services.object_serializer.object_serializer_forward_cache import ObjectSerializerForwardCache
+from invokeai.app.services.object_serializer.conditioning_null import NullConditioningSerializer
 from invokeai.app.services.progress_previews.progress_previews_default import MemoryProgressPreviews
 from invokeai.app.services.project_records.project_records_default import ProjectRecordsStorage
 from invokeai.app.services.session_processor.session_processor_default import (
@@ -70,9 +67,6 @@ from invokeai.app.services.videos.videos_default import VideoService
 from invokeai.app.services.wildcard_records.wildcard_records_default import WildcardRecordsStorage
 from invokeai.app.services.workflow_records.workflow_records_default import WorkflowRecordsStorage
 from invokeai.app.services.workflow_thumbnails.workflow_thumbnails_disk import WorkflowThumbnailFileStorageDisk
-from invokeai.backend.architectures import conditioning_safe_globals
-from invokeai.backend.architectures import validate as validate_architectures
-from invokeai.backend.stable_diffusion.diffusion.conditioning_data import ConditioningFieldData
 from invokeai.backend.util.logging import InvokeAILogger
 from invokeai.version.invokeai_version import __version__
 
@@ -109,15 +103,9 @@ class ApiDependencies:
         loop: asyncio.AbstractEventLoop,
         logger: Logger = logger,
     ) -> None:
-        # The one authoritative architecture gate. Every entry point that builds services comes
-        # through here — `run_app`'s lifespan, and the embedders and tests that never go through
-        # `run_app` at all — so this is the only place it is called. It runs before anything else
-        # because `ObjectSerializerDisk` below derives its `safe_globals` from the registry, and
-        # that mutates process-global torch state. The import above is at module scope rather than
-        # lazily inside this function for the same reason, one step earlier: it is what fills the
-        # registry, and importing this module is all `scripts/generate_openapi_schema.py` does.
-        validate_architectures()
-
+        # The one authoritative architecture gate lived here; the local-model architecture
+        # registry it validated was removed with the torch stack, so API-only builds have
+        # nothing to validate.
         logger.info(f"InvokeAI version {__version__}")
         logger.info(f"Root directory = {str(config.root_path)}")
 
@@ -158,22 +146,15 @@ class ApiDependencies:
         gallery = GalleryService(database)
         gallery_maintenance = GalleryMaintenanceService()
         invocation_cache = MemoryInvocationCache(max_cache_size=config.node_cache_size)
+        # API-only build: conditioning payloads cannot be produced; the slot stays wired to a
+        # serializer that raises with a clear error if anything tries to use it.
+        conditioning = NullConditioningSerializer()
+        # Object storage for node intermediates. The API-only build produces neither torch
+        # tensors nor conditioning data, so the tensor store keeps an empty trusted-globals list.
         tensors = ObjectSerializerForwardCache(
-            ObjectSerializerDisk[torch.Tensor](
+            ObjectSerializerDisk[object](
                 output_folder / "tensors",
-                safe_globals=[torch.Tensor],
-                ephemeral=True,
-            ),
-        )
-        conditioning = ObjectSerializerForwardCache(
-            ObjectSerializerDisk[ConditioningFieldData](
-                output_folder / "conditioning",
-                # Every architecture's conditioning class, from what each declares under
-                # invokeai/backend/architectures/defs/. Missing one here fails nowhere near
-                # here: the encoder runs, writes its output, and the denoise node then dies
-                # unpickling it — which is why the list is assembled in one place and this call
-                # site is asserted against it in tests/backend/architectures/test_conditioning.py.
-                safe_globals=conditioning_safe_globals(),
+                safe_globals=[],
                 ephemeral=True,
             ),
         )
@@ -213,8 +194,6 @@ class ApiDependencies:
         client_state_persistence = ClientStatePersistence(database)
         project_records = ProjectRecordsStorage(database)
         users = UserService(database)
-        image_index_records = ImageIndexRecords(database)
-        image_index = ImageIndexService()
         intermediates = IntermediatesService(records=IntermediatesRecords(database), logger=logger)
         fonts = FontService(
             database,
@@ -268,18 +247,10 @@ class ApiDependencies:
             video_records=video_records,
             board_video_records=board_video_records,
             gallery=gallery,
-            image_index_records=image_index_records,
-            image_index=image_index,
             fonts=fonts,
             intermediates=intermediates,
             gallery_maintenance=gallery_maintenance,
         )
-
-        # Constructing the Invoker starts every service, including the session
-        # processor thread (which may immediately resume queue items that were
-        # pending at shutdown). Trigger torch attention's lazy, non-thread-safe
-        # kernel init while the process is still single-threaded.
-        warm_up_attention(config, logger)
 
         ApiDependencies.invoker = Invoker(services)
         configured_external_providers = {

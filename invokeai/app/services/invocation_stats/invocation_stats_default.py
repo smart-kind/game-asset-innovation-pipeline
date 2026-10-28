@@ -4,9 +4,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator
 
-import psutil
-import torch
-
 import invokeai.backend.util.logging as logger
 from invokeai.app.invocations.baseinvocation import BaseInvocation
 from invokeai.app.services.invocation_stats.invocation_stats_base import InvocationStatsServiceBase
@@ -21,10 +18,18 @@ from invokeai.app.services.invocation_stats.invocation_stats_common import (
 )
 from invokeai.app.services.invoker import Invoker
 from invokeai.backend.model_manager.load.model_cache.cache_stats import CacheStats
-from invokeai.backend.util.devices import TorchDevice
 
 # Size of 1GB in bytes.
 GB = 2**30
+
+
+def _rss_bytes() -> int:
+    """This process's resident memory in bytes. API-only builds without psutil report 0."""
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    return psutil.Process().memory_info().rss
 
 
 def _vram_allocated_bytes() -> float:
@@ -35,6 +40,13 @@ def _vram_allocated_bytes() -> float:
     allocation while the Arc is full -- and stats that always read 0.0 GB make XPU bug reports
     impossible to act on.
     """
+    try:
+        import torch
+
+        from invokeai.backend.util.devices import TorchDevice
+    except ImportError:
+        # API-only build: no torch, no accelerator memory to attribute.
+        return 0.0
     device = TorchDevice.choose_torch_device()
     if device.type == "cuda" and torch.cuda.is_available():
         return torch.cuda.memory_allocated(device)
@@ -68,7 +80,7 @@ class InvocationStatsService(InvocationStatsServiceBase):
 
         # Record state before the invocation.
         start_time = time.time()
-        start_ram = psutil.Process().memory_info().rss
+        start_ram = _rss_bytes()
 
         # Remember current VRAM usage
         vram_in_use = _vram_allocated_bytes()
@@ -88,7 +100,7 @@ class InvocationStatsService(InvocationStatsServiceBase):
                 start_time=start_time,
                 end_time=time.time(),
                 start_ram_gb=start_ram / GB,
-                end_ram_gb=psutil.Process().memory_info().rss / GB,
+                end_ram_gb=_rss_bytes() / GB,
                 delta_vram_gb=delta_vram_gb,
             )
             self._stats[graph_execution_state_id].add_node_execution_stats(node_stats)
@@ -103,7 +115,13 @@ class InvocationStatsService(InvocationStatsServiceBase):
         model_cache_stats_summary = self._get_model_cache_summary(graph_execution_state_id)
         # Note: We use memory_allocated() here (not memory_reserved()) because we want to show
         # the current actively-used VRAM, not the total reserved memory including PyTorch's cache.
-        on_accelerator = TorchDevice.choose_torch_device().type in ("cuda", "xpu")
+        on_accelerator = False
+        try:
+            from invokeai.backend.util.devices import TorchDevice
+
+            on_accelerator = TorchDevice.choose_torch_device().type in ("cuda", "xpu")
+        except ImportError:
+            pass  # API-only build: no accelerator to attribute VRAM to
         vram_usage_gb = (_vram_allocated_bytes() / GB) if on_accelerator else None
 
         return InvocationStatsSummary(

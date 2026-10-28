@@ -14,7 +14,6 @@ from invokeai.backend.model_manager.configs.external_api import (
     ExternalModelCapabilities,
     ExternalModelPanelSchema,
 )
-from invokeai.backend.model_manager.configs.textual_inversion import TI_File_SD1_Config
 from invokeai.backend.model_manager.taxonomy import ModelSourceType, ModelType
 
 
@@ -39,6 +38,51 @@ class MockApiDependencies(ApiDependencies):
 
     def __init__(self, invoker: DummyInvoker) -> None:
         self.invoker = invoker
+
+
+@pytest.fixture
+def mm2_app_config(tmp_path_factory: pytest.TempPathFactory) -> Any:
+    from invokeai.app.services.config import InvokeAIAppConfig
+
+    root = tmp_path_factory.mktemp("mm2_root")
+    app_config = InvokeAIAppConfig(models_dir=root / "models", log_level="info", allow_unknown_models=True)
+    app_config._root = root
+    return app_config
+
+
+@pytest.fixture
+def mm2_model_manager(mm2_app_config: Any) -> Any:
+    """A real model manager over an in-memory SQLite record store.
+
+    The API-only build's load service is a no-op; the installer is a mock because the routes
+    these tests exercise never reach it.
+    """
+    from unittest.mock import MagicMock
+
+    from invokeai.app.services.model_load.model_load_default import ModelLoadService
+    from invokeai.app.services.model_manager.model_manager_default import ModelManagerService
+    from invokeai.app.services.model_records.model_records_sql import ModelRecordServiceSQL
+    from invokeai.backend.model_manager.configs.unknown import Unknown_Config
+    from invokeai.backend.util.logging import InvokeAILogger
+    from tests.fixtures.sqlite_database import create_mock_sqlite_database
+
+    logger = InvokeAILogger.get_logger(config=mm2_app_config)
+    db = create_mock_sqlite_database(mm2_app_config, logger)
+    store = ModelRecordServiceSQL(db, logger)
+    store.add_model(
+        Unknown_Config(
+            key="test_config_1",
+            path="/tmp/foo1",
+            name="Test Config 1",
+            hash="ABC123",
+            file_size=1024,
+            source="test/source/",
+            source_type=ModelSourceType.Path,
+        )
+    )
+    return ModelManagerService(
+        store=store, install=MagicMock(), load=ModelLoadService(app_config=mm2_app_config)
+    )
 
 
 def test_model_manager_external_config_round_trip(
@@ -279,7 +323,10 @@ def test_empty_model_cache_aggregates_per_device_results(monkeypatch: Any, clien
     """Upstream's multi-GPU fan-out returns None from this route, but webv2's clearModelCache awaits
     the cleared-model count and freed bytes to build its toast. Every per-device cache must be
     cleared and their results summed."""
-    from invokeai.backend.model_manager.load.model_cache.model_cache import CacheClearResult
+    from collections import namedtuple
+
+    # The route only reads these two fields; the real cache classes left with the torch stack.
+    CacheClearResult = namedtuple("CacheClearResult", ["models_cleared", "bytes_freed"])
 
     class _Cache:
         def __init__(self, models_cleared: int, bytes_freed: int) -> None:
@@ -309,7 +356,9 @@ def test_empty_model_cache_aggregates_per_device_results(monkeypatch: Any, clien
 def test_empty_model_cache_clears_duplicate_cache_objects_once(monkeypatch: Any, client: TestClient) -> None:
     """ram_caches can map several device keys to one cache object. Clearing it twice would report
     the second (already-empty) pass, so the id() guard keeps the totals honest."""
-    from invokeai.backend.model_manager.load.model_cache.model_cache import CacheClearResult
+    from collections import namedtuple
+
+    CacheClearResult = namedtuple("CacheClearResult", ["models_cleared", "bytes_freed"])
 
     class _Cache:
         def __init__(self) -> None:
@@ -421,161 +470,41 @@ def test_update_model_record_answers_with_the_service_outcome(client: TestClient
 def test_reidentify_model_answers_with_the_service_outcome(
     client: TestClient, model_record_routes: Any, mm2_app_config: Any
 ) -> None:
-    from invokeai.backend.model_manager.configs.main import Main_Checkpoint_SD1_Config
-    from tests.backend.model_manager.load.state_dicts import clip_g_comfy_keys
-    from tests.backend.model_manager.load.state_dicts.utils import write_header_only_safetensors
+    from invokeai.backend.model_manager.configs.unknown import Unknown_Config
 
-    # A CLIP-G without the projection SD 3 needs: recognised, and refused as unusable.
-    keys = dict(clip_g_comfy_keys.state_dict_keys)
-    del keys["text_projection.weight"]
-    write_header_only_safetensors(mm2_app_config.models_path / "clip-g.safetensors", keys)
+    # External records carry no on-disk weights: reidentify answers 200 with the record intact.
     model_record_routes.store.add_model(
-        Main_Checkpoint_SD1_Config(
-            key="unusable",
-            path="clip-g.safetensors",
-            name="unusable",
+        ExternalApiModelConfig(
+            key="external-live",
+            provider_id="openai",
+            provider_model_id="gpt-image-2",
+            name="external-live",
+            capabilities=ExternalModelCapabilities(modes=["txt2img"]),
+        )
+    )
+    # Local (non-external) records can no longer be re-probed in this build: the disk
+    # identification of checkpoint/LoRA/VAE formats was removed, so reidentify is a 400.
+    model_record_routes.store.add_model(
+        Unknown_Config(
+            key="probed",
+            name="probed",
+            path="mystery.safetensors",
             hash="hash",
-            file_size=1,
+            file_size=18,
             source="local-source",
             source_type=ModelSourceType.Path,
-            prediction_type="epsilon",
-            variant="normal",
         )
     )
 
-    unusable = client.post("/api/v2/models/i/unusable/reidentify")
+    external = client.post("/api/v2/models/i/external-live/reidentify")
+    rejected = client.post("/api/v2/models/i/probed/reidentify")
     unknown = client.post("/api/v2/models/i/no-such-model/reidentify")
 
-    assert unusable.status_code == 400
+    assert external.status_code == 200, external.text
+    assert external.json()["key"] == "external-live"
+    assert rejected.status_code == 400
+    assert "not available in API-only build" in rejected.json()["detail"]
     assert unknown.status_code == 404
-
-
-def test_convert_model_rejects_a_second_conversion_while_one_is_running() -> None:
-    """Conversions are serialized, and the loser is told so instead of being made to wait.
-
-    Two conversions in flight means two models resident at once, which nothing bounds, and for
-    the same key the second reads a record the first is midway through replacing. As `async def`
-    handlers with no `await` they could not overlap; in the threadpool they can.
-    """
-    from unittest.mock import MagicMock
-
-    from starlette.exceptions import HTTPException
-
-    from invokeai.app.api.routers.model_manager import _MODEL_CONVERSION_LOCK, convert_model
-
-    assert _MODEL_CONVERSION_LOCK.acquire(blocking=False), "lock leaked by an earlier test"
-    try:
-        with pytest.raises(HTTPException) as exc_info:
-            # Never reaches the model store: the guard is the first thing the handler does.
-            convert_model(MagicMock(), key="some-key")
-    finally:
-        _MODEL_CONVERSION_LOCK.release()
-
-    assert exc_info.value.status_code == 409
-    assert "already in progress" in exc_info.value.detail
-
-
-def test_convert_model_releases_the_lock_when_the_conversion_fails() -> None:
-    """A failed conversion must not wedge the endpoint for the rest of the process's life."""
-    from unittest.mock import MagicMock, patch
-
-    from starlette.exceptions import HTTPException
-
-    from invokeai.app.api.routers.model_manager import _MODEL_CONVERSION_LOCK, convert_model
-
-    with patch("invokeai.app.api.routers.model_manager._convert_model", side_effect=RuntimeError("boom")):
-        with pytest.raises(RuntimeError):
-            convert_model(MagicMock(), key="some-key")
-
-    assert _MODEL_CONVERSION_LOCK.acquire(blocking=False), "the lock was not released on failure"
-    _MODEL_CONVERSION_LOCK.release()
-
-    # And the endpoint still works afterwards - the next caller gets past the guard.
-    with patch("invokeai.app.api.routers.model_manager._convert_model", side_effect=HTTPException(424, "not found")):
-        with pytest.raises(HTTPException) as exc_info:
-            convert_model(MagicMock(), key="some-key")
-    assert exc_info.value.status_code == 424
-
-
-def test_convert_model_retains_recovery_source_and_restores_model_name(monkeypatch: Any, tmp_path: Path) -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from starlette.exceptions import HTTPException
-
-    from invokeai.app.api.routers import model_manager as model_manager_router
-    from invokeai.app.services.model_install.model_install_common import InstallRecoveryRequiredError
-    from invokeai.app.services.model_records import ModelRecordChanges
-    from invokeai.backend.model_manager.configs.main import Main_Checkpoint_SD1_Config
-    from invokeai.backend.model_manager.taxonomy import (
-        BaseModelType,
-        ModelFormat,
-        ModelSourceType,
-        ModelType,
-        ModelVariantType,
-        SchedulerPredictionType,
-    )
-
-    model_config = Main_Checkpoint_SD1_Config(
-        key="model-key",
-        path="/models/original.safetensors",
-        name="Original Model",
-        format=ModelFormat.Checkpoint,
-        base=BaseModelType.StableDiffusion1,
-        type=ModelType.Main,
-        config_path="/configs/model.yaml",
-        variant=ModelVariantType.Normal,
-        hash="111222333444",
-        file_size=8192,
-        source="/models/original.safetensors",
-        source_type=ModelSourceType.Path,
-        prediction_type=SchedulerPredictionType.Epsilon,
-    )
-
-    class Store:
-        def get_model(self, key: str) -> Main_Checkpoint_SD1_Config:
-            assert key == model_config.key
-            return model_config
-
-        def update_model(self, key: str, changes: ModelRecordChanges) -> None:
-            assert key == model_config.key
-            if changes.name is not None:
-                model_config.name = changes.name
-
-    def save_pretrained(path: Path) -> None:
-        path.mkdir()
-        (path / "weights.safetensors").write_text("converted")
-
-    def reject_recovery_source(path: Path, *, config: ModelRecordChanges) -> str:
-        raise InstallRecoveryRequiredError(f"Install recovery required. Source: {path}; destination: /models/recovery")
-
-    services = SimpleNamespace(
-        model_manager=SimpleNamespace(
-            store=Store(),
-            load=SimpleNamespace(
-                load_model=lambda *_args, **_kwargs: SimpleNamespace(
-                    model=SimpleNamespace(save_pretrained=save_pretrained)
-                )
-            ),
-            install=SimpleNamespace(install_path=reject_recovery_source),
-        ),
-        configuration=SimpleNamespace(models_path=tmp_path),
-        logger=MagicMock(),
-    )
-    monkeypatch.setattr(model_manager_router, "ApiDependencies", MockApiDependencies(DummyInvoker(services)))
-
-    with pytest.raises(HTTPException) as exc_info:
-        model_manager_router.convert_model(
-            current_admin=SimpleNamespace(user_id="test-user"),
-            key=model_config.key,
-        )
-
-    assert exc_info.value.status_code == 409
-    assert "Source:" in exc_info.value.detail
-    recovery_path = Path(exc_info.value.detail.rsplit("retained at ", 1)[1].rstrip("."))
-    assert recovery_path.is_dir()
-    assert (recovery_path / "original" / "weights.safetensors").read_text() == "converted"
-    assert model_config.name == "Original Model"
 
 
 def test_cancel_model_install_does_not_map_unrelated_value_error_to_conflict(monkeypatch: Any) -> None:
@@ -776,100 +705,6 @@ def test_install_path_claim_conflict_returns_conflict(monkeypatch: Any, operatio
     assert "owns the install path" in exc_info.value.detail
 
 
-@pytest.mark.parametrize("install_fails", [False, True])
-def test_conversion_cleans_scratch_after_success_and_ordinary_failure(
-    monkeypatch: Any, tmp_path: Path, install_fails: bool
-) -> None:
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from starlette.exceptions import HTTPException
-
-    from invokeai.app.api.routers import model_manager as model_manager_router
-    from invokeai.app.services.model_images.model_images_common import ModelImageFileNotFoundException
-    from invokeai.app.services.model_records import ModelRecordChanges
-    from invokeai.backend.model_manager.configs.main import Main_Checkpoint_SD1_Config
-    from invokeai.backend.model_manager.taxonomy import (
-        BaseModelType,
-        ModelFormat,
-        ModelSourceType,
-        ModelType,
-        ModelVariantType,
-        SchedulerPredictionType,
-    )
-
-    models_path = tmp_path / "models"
-    models_path.mkdir()
-    original = Main_Checkpoint_SD1_Config(
-        key="model-key",
-        path="original.safetensors",
-        name="Original Model",
-        format=ModelFormat.Checkpoint,
-        base=BaseModelType.StableDiffusion1,
-        type=ModelType.Main,
-        config_path="model.yaml",
-        variant=ModelVariantType.Normal,
-        hash="111222333444",
-        file_size=8192,
-        source="local-source",
-        source_type=ModelSourceType.Path,
-        prediction_type=SchedulerPredictionType.Epsilon,
-    )
-    converted = SimpleNamespace(key="converted-key")
-
-    class Store:
-        def get_model(self, key: str) -> Any:
-            return original if key == original.key else converted
-
-        def update_model(self, key: str, changes: ModelRecordChanges) -> None:
-            if changes.name is not None:
-                original.name = changes.name
-
-    def save_pretrained(path: Path) -> None:
-        path.mkdir()
-        (path / "weights.safetensors").write_bytes(b"weights")
-
-    class Installer:
-        def install_path(self, _path: Path, *, config: ModelRecordChanges) -> str:
-            if install_fails:
-                raise ValueError("ordinary install failure")
-            return converted.key
-
-        def delete(self, _key: str) -> None:
-            return None
-
-    def model_image(_key: str) -> None:
-        raise ModelImageFileNotFoundException()
-
-    services = SimpleNamespace(
-        model_manager=SimpleNamespace(
-            store=Store(),
-            load=SimpleNamespace(
-                load_model=lambda *_args, **_kwargs: SimpleNamespace(
-                    model=SimpleNamespace(save_pretrained=save_pretrained)
-                )
-            ),
-            install=Installer(),
-        ),
-        configuration=SimpleNamespace(models_path=models_path),
-        model_images=SimpleNamespace(get=model_image),
-        logger=MagicMock(),
-    )
-    monkeypatch.setattr(model_manager_router, "ApiDependencies", MockApiDependencies(DummyInvoker(services)))
-    monkeypatch.setattr(model_manager_router, "prepare_model_config_for_response", lambda config, _deps: config)
-
-    if install_fails:
-        with pytest.raises(HTTPException) as exc_info:
-            model_manager_router._convert_model(original.key, user_id="test-user")
-        assert exc_info.value.status_code == 409
-    else:
-        assert model_manager_router._convert_model(original.key, user_id="test-user") is converted
-
-    scratch_dir = models_path / model_manager_router.CONVERSION_SCRATCH_DIRNAME
-    assert scratch_dir.exists()
-    assert list(scratch_dir.iterdir()) == []
-
-
 def test_cancel_recovery_required_install_returns_conflict(monkeypatch: Any) -> None:
     from types import SimpleNamespace
 
@@ -922,91 +757,37 @@ def test_cancel_active_install_returns_conflict(monkeypatch: Any) -> None:
     assert "being moved" in exc_info.value.detail
 
 
-def test_delete_is_refused_while_the_same_model_is_being_converted() -> None:
-    """A delete landing mid-conversion must not pull the source out from under it.
-
-    Conversion is a read-modify-replace spanning many service calls: it loads the model, writes a
-    diffusers copy, installs that copy, then deletes the original. As `async def` bodies with no
-    `await` neither route could interleave with the other; in the threadpool they can. A delete
-    slipping into the middle removes the record the conversion is still working from, the
-    conversion's own final delete then fails, and the copy it already installed survives — so the
-    admin is answered 204 and the model reappears under a new key.
-    """
-    import threading
-    from unittest.mock import MagicMock, patch
-
-    from starlette.exceptions import HTTPException
-
-    from invokeai.app.api.routers.model_manager import convert_model, delete_model
-
-    conversion_running = threading.Event()
-    release_conversion = threading.Event()
-    installer = MagicMock()
-
-    def blocking_conversion(key: str, user_id: str) -> object:
-        conversion_running.set()
-        assert release_conversion.wait(timeout=30)
-        return MagicMock()
-
-    with patch("invokeai.app.api.routers.model_manager.ApiDependencies") as deps:
-        deps.invoker.services.model_manager.install = installer
-        with patch("invokeai.app.api.routers.model_manager._convert_model", side_effect=blocking_conversion):
-            conversion = threading.Thread(target=convert_model, args=(MagicMock(),), kwargs={"key": "model-key"})
-            conversion.start()
-            try:
-                assert conversion_running.wait(timeout=30)
-
-                with pytest.raises(HTTPException) as exc_info:
-                    delete_model(MagicMock(), key="model-key")
-
-                assert exc_info.value.status_code == 409
-                # The refusal has to happen before the installer is touched, not after.
-                installer.delete.assert_not_called()
-
-                # A different model is untouched by the claim.
-                delete_model(MagicMock(), key="other-key")
-                installer.delete.assert_called_once_with("other-key")
-            finally:
-                release_conversion.set()
-                conversion.join(timeout=30)
-                assert not conversion.is_alive()
-
-        # Once the conversion is done the key is free again.
-        delete_model(MagicMock(), key="model-key")
-    assert installer.delete.call_args_list[-1].args == ("model-key",)
-
-
 def test_bulk_delete_reports_a_busy_key_instead_of_racing_it() -> None:
     """Bulk deletion claims each key separately, so one busy model does not stall or corrupt the rest."""
     import threading
     from unittest.mock import MagicMock, patch
 
-    from invokeai.app.api.routers.model_manager import BulkDeleteModelsRequest, bulk_delete_models, convert_model
+    from invokeai.app.api.routers import model_manager as model_manager_router
+    from invokeai.app.api.routers.model_manager import BulkDeleteModelsRequest, bulk_delete_models
 
-    conversion_running = threading.Event()
-    release_conversion = threading.Event()
+    hold = threading.Event()
+    release = threading.Event()
     installer = MagicMock()
 
-    def blocking_conversion(key: str, user_id: str) -> object:
-        conversion_running.set()
-        assert release_conversion.wait(timeout=30)
-        return MagicMock()
+    def hold_claim() -> None:
+        with model_manager_router._claim_model_key("busy-key"):
+            hold.set()
+            assert release.wait(timeout=30)
 
+    claim_thread = threading.Thread(target=hold_claim, daemon=True)
     with patch("invokeai.app.api.routers.model_manager.ApiDependencies") as deps:
         deps.invoker.services.model_manager.install = installer
-        with patch("invokeai.app.api.routers.model_manager._convert_model", side_effect=blocking_conversion):
-            conversion = threading.Thread(target=convert_model, args=(MagicMock(),), kwargs={"key": "busy-key"})
-            conversion.start()
-            try:
-                assert conversion_running.wait(timeout=30)
+        claim_thread.start()
+        try:
+            assert hold.wait(timeout=30)
 
-                response = bulk_delete_models(
-                    MagicMock(), request=BulkDeleteModelsRequest(keys=["free-key", "busy-key"])
-                )
-            finally:
-                release_conversion.set()
-                conversion.join(timeout=30)
-                assert not conversion.is_alive()
+            response = bulk_delete_models(
+                MagicMock(), request=BulkDeleteModelsRequest(keys=["free-key", "busy-key"])
+            )
+        finally:
+            release.set()
+            claim_thread.join(timeout=30)
+            assert not claim_thread.is_alive()
 
     assert response.deleted == ["free-key"]
     assert [entry["key"] for entry in response.failed] == ["busy-key"]
@@ -1015,52 +796,51 @@ def test_bulk_delete_reports_a_busy_key_instead_of_racing_it() -> None:
 
 
 @pytest.fixture
-def conversion_in_flight():
-    """Hold a conversion of `busy-key` at a barrier for the duration of the test.
+def claimed_key_in_flight():
+    """Hold a key claim on `busy-key` for the duration of the test, as a long-running mutation would.
 
-    Yields the mocked installer/store/model_images so a test can assert what the racing request
+    Yields the mocked ApiDependencies so a test can assert what the racing request
     did or did not reach.
     """
     import threading
     from contextlib import contextmanager
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import patch
 
-    from invokeai.app.api.routers.model_manager import convert_model
+    from invokeai.app.api.routers import model_manager as model_manager_router
 
     @contextmanager
     def _run(key: str = "busy-key"):
-        running = threading.Event()
+        hold = threading.Event()
         release = threading.Event()
 
-        def blocking_conversion(key: str, user_id: str) -> object:
-            running.set()
-            assert release.wait(timeout=30)
-            return MagicMock()
+        def hold_claim() -> None:
+            with model_manager_router._claim_model_key(key):
+                hold.set()
+                assert release.wait(timeout=30)
 
+        claim_thread = threading.Thread(target=hold_claim, daemon=True)
         with patch("invokeai.app.api.routers.model_manager.ApiDependencies") as deps:
-            with patch("invokeai.app.api.routers.model_manager._convert_model", side_effect=blocking_conversion):
-                conversion = threading.Thread(target=convert_model, args=(MagicMock(),), kwargs={"key": key})
-                conversion.start()
-                try:
-                    assert running.wait(timeout=30)
-                    yield deps
-                finally:
-                    release.set()
-                    conversion.join(timeout=30)
-                    assert not conversion.is_alive()
+            claim_thread.start()
+            try:
+                assert hold.wait(timeout=30)
+                yield deps
+            finally:
+                release.set()
+                claim_thread.join(timeout=30)
+                assert not claim_thread.is_alive()
 
     return _run
 
 
-def test_reidentify_is_refused_while_the_same_model_is_being_converted(conversion_in_flight) -> None:
-    """Reidentification rewrites the record a conversion is about to replace from its own snapshot."""
+def test_reidentify_is_refused_while_an_operation_on_the_same_model_is_in_progress(claimed_key_in_flight) -> None:
+    """Reidentification must not rewrite a record a running mutation is about to replace from its snapshot."""
     from unittest.mock import MagicMock
 
     from starlette.exceptions import HTTPException
 
     from invokeai.app.api.routers.model_manager import reidentify_model
 
-    with conversion_in_flight() as deps:
+    with claimed_key_in_flight() as deps:
         with pytest.raises(HTTPException) as exc_info:
             reidentify_model(key="busy-key", current_admin=MagicMock())
 
@@ -1069,13 +849,13 @@ def test_reidentify_is_refused_while_the_same_model_is_being_converted(conversio
 
 
 @pytest.mark.anyio
-async def test_update_model_record_is_refused_while_the_same_model_is_being_converted(
-    conversion_in_flight,
+async def test_update_model_record_is_refused_while_an_operation_on_the_same_model_is_in_progress(
+    claimed_key_in_flight,
 ) -> None:
-    """An edit accepted mid-conversion would be reported as saved and then dropped.
+    """An edit accepted while a mutation is in flight would be reported as saved and then dropped.
 
-    The conversion writes the name, description, hash and source it read *before* it started into
-    the replacement record, so anything written in between never reaches the new key.
+    The running mutation writes the name, description, hash and source it read *before* it started
+    into the replacement record, so anything written in between never reaches the new key.
     """
     from unittest.mock import MagicMock
 
@@ -1084,7 +864,7 @@ async def test_update_model_record_is_refused_while_the_same_model_is_being_conv
     from invokeai.app.api.routers.model_manager import update_model_record
     from invokeai.app.services.model_records import ModelRecordChanges
 
-    with conversion_in_flight() as deps:
+    with claimed_key_in_flight() as deps:
         with pytest.raises(HTTPException) as exc_info:
             await update_model_record(
                 key="busy-key", changes=ModelRecordChanges(name="renamed"), current_admin=MagicMock()
@@ -1094,15 +874,15 @@ async def test_update_model_record_is_refused_while_the_same_model_is_being_conv
         deps.invoker.services.model_manager.update_model_record.assert_not_called()
 
 
-def test_model_image_writes_are_refused_while_the_same_model_is_being_converted(conversion_in_flight) -> None:
-    """A conversion moves the image to the replacement's key, so writes in between are lost."""
+def test_model_image_writes_are_refused_while_an_operation_on_the_same_model_is_in_progress(claimed_key_in_flight) -> None:
+    """A running mutation can move the image to a replacement key, so writes in between are lost."""
     from unittest.mock import MagicMock
 
     from starlette.exceptions import HTTPException
 
     from invokeai.app.api.routers.model_manager import delete_model_image
 
-    with conversion_in_flight() as deps:
+    with claimed_key_in_flight() as deps:
         with pytest.raises(HTTPException) as exc_info:
             delete_model_image(MagicMock(), key="busy-key")
 
@@ -1166,12 +946,12 @@ def test_model_mutations_document_claim_conflicts() -> None:
         assert 409 in routes[operation_id].responses
 
 
-def test_bulk_reidentify_reports_a_busy_key_instead_of_racing_it(conversion_in_flight) -> None:
+def test_bulk_reidentify_reports_a_busy_key_instead_of_racing_it(claimed_key_in_flight) -> None:
     from unittest.mock import MagicMock
 
     from invokeai.app.api.routers.model_manager import BulkReidentifyModelsRequest, bulk_reidentify_models
 
-    with conversion_in_flight() as deps:
+    with claimed_key_in_flight() as deps:
         response = bulk_reidentify_models(
             MagicMock(), request=BulkReidentifyModelsRequest(keys=["free-key", "busy-key"])
         )
@@ -1315,7 +1095,7 @@ async def test_update_model_image_404s_for_a_legacy_unsafe_model_key(real_model_
 
 @pytest.mark.anyio
 async def test_update_model_image_checks_the_record_while_holding_the_claim() -> None:
-    """Deletion and conversion claim the key too, so checking the record under the claim is what stops one of them
+    """Deletion and replacement claim the key too, so checking the record under the claim is what stops one of them
     from removing the model between the check and the save - which would leave an orphan image behind a 200."""
     from unittest.mock import MagicMock, patch
 
@@ -1350,7 +1130,7 @@ async def test_update_model_image_checks_the_record_while_holding_the_claim() ->
 
 @pytest.mark.anyio
 async def test_record_writes_run_while_holding_the_claim() -> None:
-    """A conversion of the same key carries a snapshot of the record into its replacement, so an edit or
+    """A replacement of the same key carries a snapshot of the record into its successor, so an edit or
     re-identification that ran outside the claim would be reported as saved and then lost."""
     from unittest.mock import MagicMock, patch
 
@@ -1390,7 +1170,7 @@ def test_update_model_image_documents_its_404(client: TestClient) -> None:
 
 def test_a_case_variant_of_a_claimed_key_is_refused() -> None:
     """Cover images are `<key>.webp`, which is one file for `K` and `k` on a case-insensitive filesystem - so a
-    claim on one must block the other, or an image delete could race a conversion of the same model."""
+    claim on one must block the other, or an image delete could race a replacement of the same model."""
     from starlette.exceptions import HTTPException
 
     from invokeai.app.api.routers import model_manager
@@ -1521,40 +1301,3 @@ def test_an_encoded_key_reaches_the_image_route_intact(client: TestClient, tmp_p
 
     assert response.status_code == 200
     deps.invoker.services.model_images.get_path.assert_called_once_with("X?y")
-
-
-def test_the_orphan_routes_scan_with_the_model_records(
-    monkeypatch: Any, client: TestClient, mm2_model_manager: Any, mm2_app_config: Any
-) -> None:
-    models_path: Path = mm2_app_config.models_path
-    for directory in ("registered", "unregistered"):
-        (models_path / directory).mkdir(parents=True, exist_ok=True)
-        (models_path / directory / "model.safetensors").write_bytes(b"not really a model")
-    mm2_model_manager.store.add_model(
-        TI_File_SD1_Config(
-            path="registered/model.safetensors",
-            name="registered",
-            hash="ABC123",
-            file_size=18,
-            source="test/source/",
-            source_type=ModelSourceType.Path,
-        )
-    )
-    services = type("Services", (), {})()
-    services.model_manager = mm2_model_manager
-    services.configuration = mm2_app_config
-    invoker = DummyInvoker(services)
-    monkeypatch.setattr("invokeai.app.api.routers.model_manager.ApiDependencies", MockApiDependencies(invoker))
-    monkeypatch.setattr("invokeai.app.api.auth_dependencies.ApiDependencies", MockApiDependencies(invoker))
-
-    found = client.get("/api/v2/models/sync/orphaned")
-
-    assert found.status_code == 200, found.text
-    reported = {orphan["path"] for orphan in found.json()}
-    assert "unregistered" in reported and "registered" not in reported
-
-    deleted = client.request("DELETE", "/api/v2/models/sync/orphaned", json={"paths": ["unregistered"]})
-
-    assert deleted.status_code == 200, deleted.text
-    assert deleted.json() == {"deleted": ["unregistered"], "errors": {}}
-    assert (models_path / "registered").exists() and not (models_path / "unregistered").exists()

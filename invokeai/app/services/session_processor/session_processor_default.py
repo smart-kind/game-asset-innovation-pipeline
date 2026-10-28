@@ -4,9 +4,8 @@ import traceback
 from contextlib import contextmanager, nullcontext, suppress
 from threading import BoundedSemaphore, Thread
 from threading import Event as ThreadEvent
-from typing import Iterator, Optional
+from typing import TYPE_CHECKING, Iterator, Optional
 
-import torch
 from starlette.concurrency import run_in_threadpool
 
 from invokeai.app.invocations.baseinvocation import BaseInvocation, BaseInvocationOutput
@@ -46,12 +45,39 @@ from invokeai.app.services.session_queue.session_queue_common import (
 from invokeai.app.services.shared.graph import CollectInvocation, IterateInvocation, NodeInputError
 from invokeai.app.services.shared.invocation_context import InvocationContextData, build_invocation_context
 from invokeai.app.util.profiler import Profiler
-from invokeai.backend.util.device_pool import (
-    GENERATION_DEVICE_POOL,
-    idle_device_borrowed,
-)
-from invokeai.backend.util.devices import TorchDevice, disable_conv_benchmark_empty_cache
-from invokeai.backend.util.wddm import paged_bytes
+
+# The torch device pool and device helpers are absent in API-only builds. Workers then run
+# device-less: the null pool answers every query as "no GPU to wait for", and the code paths
+# that would pin or flush a device stay behind their existing `device is not None` guards.
+try:
+    from invokeai.backend.util.device_pool import GENERATION_DEVICE_POOL, idle_device_borrowed
+except ImportError:
+
+    @contextmanager
+    def _idle_device_borrowed(exclude):  # type: ignore[no-untyped-def] # noqa: ANN001
+        yield None
+
+    class _NullGenerationDevicePool:
+        def is_lent(self, device):  # type: ignore[no-untyped-def] # noqa: ANN001
+            return False
+
+        def acquire_session(self, device):  # type: ignore[no-untyped-def] # noqa: ANN001
+            pass
+
+        def release_session(self, device):  # type: ignore[no-untyped-def] # noqa: ANN001
+            pass
+
+        def set_generation_devices(self, devices):  # type: ignore[no-untyped-def] # noqa: ANN001
+            pass
+
+        def set_release_listener(self, listener):  # type: ignore[no-untyped-def] # noqa: ANN001
+            pass
+
+    GENERATION_DEVICE_POOL = _NullGenerationDevicePool()  # type: ignore[assignment]
+    idle_device_borrowed = _idle_device_borrowed  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    import torch
 
 # Paged-out VRAM worth a warning. Weight uploads page a few hundred MB for an instant (0.25-0.36 GiB measured on an
 # RX 9060 XT), so the threshold sits above that; a session that ends with more than this paged has lost real VRAM.
@@ -431,7 +457,14 @@ class DefaultSessionRunner(SessionRunnerBase):
         session on that GPU can never run concurrently against the same cached encoder (which would
         corrupt it). If no idle GPU is free, the node runs on the worker's own GPU unchanged.
         """
-        native_device = TorchDevice.get_session_device()
+        try:
+            from invokeai.backend.util.devices import TorchDevice
+
+            native_device = TorchDevice.get_session_device()
+        except ImportError:
+            # API-only build: no native GPU, so there is no idle one to borrow around.
+            yield
+            return
         if (
             native_device is None
             or native_device.type not in ("cuda", "xpu")
@@ -495,7 +528,7 @@ class DefaultSessionRunner(SessionRunnerBase):
         """
         model_manager = getattr(self._services, "model_manager", None)
         load = model_manager.load if model_manager is not None else None
-        if load is None or not self._services.configuration.offload_on_architecture_switch:
+        if load is None or load.ram_cache is None or not self._services.configuration.offload_on_architecture_switch:
             return
         try:
             self._architecture_switch.before_session(queue_item.session.graph, load.ram_cache)
@@ -677,7 +710,7 @@ class _SessionWorker:
     event so concurrent sessions can be canceled independently.
     """
 
-    def __init__(self, device: Optional[torch.device], runner: SessionRunnerBase) -> None:
+    def __init__(self, device: Optional["torch.device"], runner: SessionRunnerBase) -> None:
         self.device = device
         self.runner = runner
         self.cancel_event = ThreadEvent()
@@ -710,7 +743,7 @@ class DefaultSessionProcessor(SessionProcessorBase):
         self._polling_interval = polling_interval
         self._workers: list[_SessionWorker] = []
 
-    def _resolve_devices(self) -> list[Optional[torch.device]]:
+    def _resolve_devices(self) -> list[Optional["torch.device"]]:
         """Determine the per-worker devices from config.
 
         Resolves `generation_devices` (which defaults to `"auto"` — every available GPU) into one
@@ -718,6 +751,11 @@ class DefaultSessionProcessor(SessionProcessorBase):
         the global config) only if the resolution is empty (e.g. `generation_devices` set to an empty
         list).
         """
+        try:
+            from invokeai.backend.util.devices import TorchDevice
+        except ImportError:
+            # API-only build: no torch, one device-less worker.
+            return [None]
         generation_devices = self._invoker.services.configuration.generation_devices
         devices = TorchDevice.get_generation_devices(generation_devices)
         if not devices:
@@ -772,6 +810,8 @@ class DefaultSessionProcessor(SessionProcessorBase):
         # emptyCache() convoys the peer GPU's in-flight step from C++, where the peer-aware
         # empty_cache wrapper cannot intercept it. Trade it for cached workspace blocks instead.
         if sum(1 for d in devices if d is not None and d.type == "cuda") > 1:
+            from invokeai.backend.util.devices import disable_conv_benchmark_empty_cache
+
             disable_conv_benchmark_empty_cache()
 
         # If profiling is enabled, create a profiler. The same profiler will be used for all sessions. Internally,
@@ -972,6 +1012,10 @@ class DefaultSessionProcessor(SessionProcessorBase):
         device context must not fail the worker.
         """
         try:
+            from invokeai.backend.util.devices import TorchDevice
+        except ImportError:
+            return  # API-only build: nothing is cached on a device to release.
+        try:
             services = self._invoker.services
             if services.configuration.clear_vram_after_session and services.model_manager.load is not None:
                 services.model_manager.load.ram_cache.offload_models_from_vram_except(())
@@ -996,6 +1040,9 @@ class DefaultSessionProcessor(SessionProcessorBase):
         re-armed once a reading drops below it. `paged_bytes` answers None everywhere else, which keeps this silent.
         """
         try:
+            from invokeai.backend.util.devices import TorchDevice
+            from invokeai.backend.util.wddm import paged_bytes
+
             paged = paged_bytes(worker.device or TorchDevice.choose_torch_device())
         except Exception:
             self._invoker.services.logger.debug(f"Could not read paged VRAM on {worker.label}", exc_info=True)
@@ -1114,6 +1161,8 @@ class DefaultSessionProcessor(SessionProcessorBase):
             # which nodes and the model loader consult) resolves to this GPU. CUDA's and XPU's current
             # device are both per-thread.
             if worker.device is not None:
+                from invokeai.backend.util.devices import TorchDevice
+
                 TorchDevice.set_session_device(worker.device)
 
             # torch.cuda.set_device() initializes CUDA on the device, which can permanently reserve
@@ -1178,6 +1227,8 @@ class DefaultSessionProcessor(SessionProcessorBase):
 
                     if device_pin_needed:
                         assert worker.device is not None
+                        import torch
+
                         # Called directly rather than via set_torch_current_device(): that helper
                         # skips the pin when the backend reports unavailable, which is right for the
                         # idle-GPU borrow (devices there can be configured or faked for a backend
@@ -1282,6 +1333,8 @@ class DefaultSessionProcessor(SessionProcessorBase):
         finally:
             worker.queue_item = None
             if worker.device is not None:
+                from invokeai.backend.util.devices import TorchDevice
+
                 TorchDevice.clear_session_device()
             self._thread_semaphore.release()
 

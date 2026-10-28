@@ -6,7 +6,6 @@ from pathlib import Path as FilePath
 from threading import Lock
 from typing import Any, Literal, Union
 
-import torch
 import yaml
 from fastapi import Body, HTTPException, Path
 from fastapi.routing import APIRouter
@@ -30,7 +29,6 @@ from invokeai.app.services.model_records.model_records_base import UnknownModelE
 from invokeai.app.services.shared.database.startup import redacted_database_url
 from invokeai.backend.image_util.infill_methods.patchmatch import PatchMatch
 from invokeai.backend.model_manager.taxonomy import BaseModelType, ModelType
-from invokeai.backend.util.devices import TorchDevice
 from invokeai.backend.util.logging import logging
 from invokeai.version import __version__
 
@@ -73,9 +71,11 @@ def get_version() -> AppVersion:
 def get_app_deps(current_user: CurrentUserOrDefault) -> dict[str, str]:
     deps: dict[str, str] = {dist.metadata["Name"]: dist.version for dist in distributions()}
     try:
+        import torch
+    except ImportError:
+        cuda = "N/A"  # API-only build: no torch, so no CUDA build to report
+    else:
         cuda = getattr(getattr(torch, "version", None), "cuda", None) or "N/A"  # pyright: ignore[reportAttributeAccessIssue]
-    except Exception:
-        cuda = "N/A"
 
     deps["CUDA"] = cuda
 
@@ -254,6 +254,11 @@ def _redact_config_secrets(config: InvokeAIAppConfig) -> InvokeAIAppConfig:
 def get_generation_device_options(current_user: CurrentUserOrDefault) -> list[GenerationDeviceOption]:
     """List the devices available for generation, for use with the `generation_devices` setting."""
     options: list[GenerationDeviceOption] = []
+    try:
+        import torch
+    except ImportError:
+        # API-only build: no local generation devices exist to offer.
+        return options
     if torch.cuda.is_available():
         for index in range(torch.cuda.device_count()):
             device = f"cuda:{index}"
@@ -300,9 +305,14 @@ def update_runtime_config(
     # (e.g. 'cuda:99' on a 2-GPU box). Same resolution the startup path uses.
     if changes.generation_devices is not None:
         try:
-            TorchDevice.get_generation_devices(changes.generation_devices)
-        except ValueError as e:
-            raise HTTPException(status_code=422, detail=str(e))
+            from invokeai.backend.util.devices import TorchDevice
+        except ImportError:
+            pass  # API-only build: no torch to validate devices against; the setting is inert.
+        else:
+            try:
+                TorchDevice.get_generation_devices(changes.generation_devices)
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e))
     with _EXTERNAL_PROVIDER_CONFIG_LOCK:
         config = get_config()
         update_dict = changes.model_dump(exclude_unset=True)

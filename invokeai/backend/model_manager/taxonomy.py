@@ -1,25 +1,7 @@
 from enum import Enum
-from typing import Dict, TypeAlias, Union
+from typing import TypeAlias, Union
 
-import onnxruntime as ort
-import torch
-from diffusers.models.modeling_utils import ModelMixin
-from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from pydantic import TypeAdapter
-
-from invokeai.backend.raw_model import RawModel
-
-# ModelMixin is the base class for all diffusers and transformers models
-# RawModel is the InvokeAI wrapper class for ip_adapters, loras, textual_inversion and onnx runtime
-AnyModel: TypeAlias = Union[
-    ModelMixin,
-    RawModel,
-    torch.nn.Module,
-    Dict[str, torch.Tensor],
-    DiffusionPipeline,
-    ort.InferenceSession,
-]
-"""Type alias for any kind of runtime, in-memory model representation. For example, a torch module or diffusers pipeline."""
 
 
 class BaseModelType(str, Enum):

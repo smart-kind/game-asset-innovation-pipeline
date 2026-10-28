@@ -3,43 +3,16 @@ import os
 from pathlib import Path
 from typing import Any, Optional, TypeAlias
 
-import safetensors.torch
-import torch
-from gguf import GGUFValueType
 from picklescan.scanner import scan_file_path
-from safetensors import safe_open
 
 from invokeai.app.services.config.config_default import get_config
 from invokeai.backend.model_hash.model_hash import HASHING_ALGORITHMS, ModelHash
 from invokeai.backend.model_manager.taxonomy import ModelRepoVariant
-from invokeai.backend.quantization.gguf.loaders import WrappedGGUFReader, gguf_sd_loader
-from invokeai.backend.quantization.sdnq.loaders import sdnq_sd_loader
 from invokeai.backend.util.logging import InvokeAILogger
-from invokeai.backend.util.silence_warnings import SilenceWarnings
 
 StateDict: TypeAlias = dict[str | int, Any]  # When are the keys int?
 
 logger = InvokeAILogger.get_logger()
-
-
-SAFETENSORS_DTYPES: dict[str, torch.dtype] = {
-    "BOOL": torch.bool,
-    "U8": torch.uint8,
-    "I8": torch.int8,
-    "F8_E4M3": torch.float8_e4m3fn,
-    "F8_E5M2": torch.float8_e5m2,
-    "U16": torch.uint16,
-    "I16": torch.int16,
-    "BF16": torch.bfloat16,
-    "F16": torch.float16,
-    "U32": torch.uint32,
-    "I32": torch.int32,
-    "F32": torch.float32,
-    "U64": torch.uint64,
-    "I64": torch.int64,
-    "F64": torch.float64,
-}
-"""safetensors dtype names mapped to their torch equivalents."""
 
 
 def read_safetensors_header(path: Path) -> dict[str, Any]:
@@ -74,9 +47,31 @@ def _safetensors_meta_state_dict(path: Path) -> StateDict:
         Exception: The header could not be parsed, or names a dtype with no torch equivalent. Callers should
             fall back to loading the file for real.
     """
+    import torch
+
+    # safetensors dtype names mapped to their torch equivalents. Built here, not at module scope: the meta-state-dict
+    # path is the only consumer, and it runs only where torch is installed.
+    safetensors_dtypes = {
+        "BOOL": torch.bool,
+        "U8": torch.uint8,
+        "I8": torch.int8,
+        "F8_E4M3": torch.float8_e4m3fn,
+        "F8_E5M2": torch.float8_e5m2,
+        "U16": torch.uint16,
+        "I16": torch.int16,
+        "BF16": torch.bfloat16,
+        "F16": torch.float16,
+        "U32": torch.uint32,
+        "I32": torch.int32,
+        "F32": torch.float32,
+        "U64": torch.uint64,
+        "I64": torch.int64,
+        "F64": torch.float64,
+    }
+
     header = read_safetensors_header(path)
     return {
-        key: torch.empty(info["shape"], dtype=SAFETENSORS_DTYPES[info["dtype"]], device="meta")
+        key: torch.empty(info["shape"], dtype=safetensors_dtypes[info["dtype"]], device="meta")
         for key, info in header.items()
     }
 
@@ -84,6 +79,8 @@ def _safetensors_meta_state_dict(path: Path) -> StateDict:
 def _is_sdnq_safetensors(path: Path) -> bool:
     """Check if a safetensors file contains SDNQ-quantized weights by checking for weight+scale pairs."""
     try:
+        from safetensors import safe_open
+
         with safe_open(path, framework="pt", device="cpu") as f:
             keys = set(f.keys())
             for key in keys:
@@ -131,6 +128,10 @@ class ModelOnDisk:
             return self._metadata_cache[path]
         try:
             if path.suffix == ".gguf":
+                from gguf import GGUFValueType
+
+                from invokeai.backend.quantization.gguf.loaders import WrappedGGUFReader
+
                 with WrappedGGUFReader(path) as reader:
                     metadata = {
                         name: value
@@ -140,6 +141,8 @@ class ModelOnDisk:
                         and isinstance(value := field.contents(), str)
                     }
             else:
+                from safetensors import safe_open
+
                 with safe_open(path, framework="pt", device="cpu") as f:
                     metadata = f.metadata()
                     assert isinstance(metadata, dict)
@@ -175,6 +178,11 @@ class ModelOnDisk:
         if path in self._state_dict_cache:
             return self._state_dict_cache[path]
 
+        import safetensors.torch
+        import torch
+
+        from invokeai.backend.util.silence_warnings import SilenceWarnings
+
         with SilenceWarnings():
             if path.suffix.endswith((".ckpt", ".pt", ".pth", ".bin")):
                 scan_result = scan_file_path(path)
@@ -203,9 +211,13 @@ class ModelOnDisk:
             elif path.suffix.endswith(".gguf"):
                 # Identification reads shapes and never builds a module. Whether a Q8_CR file's quantization
                 # is supported is decided from its metadata by `ModelConfigFactory`, once, not per candidate.
+                from invokeai.backend.quantization.gguf.loaders import gguf_sd_loader
+
                 checkpoint = gguf_sd_loader(path, compute_dtype=torch.float32, q8_cr="ignore")
             elif path.suffix.endswith(".safetensors"):
                 if _is_sdnq_safetensors(path):
+                    from invokeai.backend.quantization.sdnq.loaders import sdnq_sd_loader
+
                     checkpoint = sdnq_sd_loader(path, compute_dtype=torch.float32)
                 else:
                     try:

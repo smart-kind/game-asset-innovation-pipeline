@@ -4,14 +4,12 @@ import asyncio
 import contextlib
 import io
 import pathlib
-import shutil
 import threading
 import traceback
 import unicodedata
 from collections.abc import Generator
 from copy import deepcopy
 from enum import Enum
-from tempfile import mkdtemp
 from typing import Any, List, Optional, Type
 
 import huggingface_hub
@@ -32,7 +30,6 @@ from invokeai.app.services.model_images.model_images_common import (
 from invokeai.app.services.model_install.model_install_common import (
     InstallCancellationConflictError,
     InstallDownloadConflictError,
-    InstallRecoveryRequiredError,
     ModelInstallJob,
 )
 from invokeai.app.services.model_load.model_load_common import distinct_caches
@@ -42,19 +39,12 @@ from invokeai.app.services.model_records import (
     ModelRecordOrderBy,
     UnknownModelException,
 )
-from invokeai.app.services.orphaned_models import CONVERSION_SCRATCH_DIRNAME, OrphanedModelInfo
+from invokeai.app.services.orphaned_models import OrphanedModelInfo
 from invokeai.app.services.shared.pagination import SQLiteDirection
 from invokeai.app.util.path_safety import is_plain_filename
 from invokeai.app.util.suppress_output import SuppressOutput
-from invokeai.backend.architectures import ArchitectureCapabilities, architecture_capabilities
 from invokeai.backend.model_manager.configs.external_api import ExternalApiModelConfig
 from invokeai.backend.model_manager.configs.factory import AnyModelConfig
-from invokeai.backend.model_manager.configs.main import (
-    Main_Checkpoint_SD1_Config,
-    Main_Checkpoint_SD2_Config,
-    Main_Checkpoint_SDXL_Config,
-    Main_Checkpoint_SDXLRefiner_Config,
-)
 from invokeai.backend.model_manager.load.fp8_capability import Fp8StorageSupport, fp8_storage_support
 from invokeai.backend.model_manager.load.model_cache.cache_stats import CacheStats
 from invokeai.backend.model_manager.metadata.fetch.huggingface import HuggingFaceMetadataFetch
@@ -75,19 +65,9 @@ from invokeai.backend.model_manager.taxonomy import BaseModelType, ModelFormat, 
 
 model_manager_router = APIRouter(prefix="/v2/models", tags=["model_manager"])
 
-# Conversion loads a model, writes a diffusers copy, then swaps the record. As an `async def`
-# body with no `await` it could not overlap with another request; running in the threadpool it
-# can, and two conversions in flight means two models resident at once with nothing bounding the
-# RAM/VRAM that takes. Held non-blocking: an admin gets a 409 telling them to wait rather than
-# an HTTP request that hangs for the minutes a conversion takes.
-_MODEL_CONVERSION_LOCK = threading.Lock()
-
-# Bounding conversions against each other is not enough: deletion runs in the threadpool too, and
-# conversion is a read-modify-replace spanning many service calls. Interleaved on one key, a
-# delete removes the source a conversion is still reading, the conversion's own final
-# `installer.delete` then fails, and the converted copy it already installed survives - so the
-# admin is told 204 and the model reappears under a new key. Claiming the key makes operations on
-# one model serialize while leaving different models free to run in parallel.
+# Claiming keys serializes record operations on one model; the lock and set are shared by the
+# upload/delete routes (the model-conversion endpoint that also used it was removed with the
+# local-model stack).
 _MODEL_KEY_CLAIM_LOCK = threading.Lock()
 _CLAIMED_MODEL_KEYS: set[str] = set()
 
@@ -256,30 +236,6 @@ example_model_input = {
 ##############################################################################
 # ROUTES
 ##############################################################################
-
-
-@model_manager_router.get(
-    "/capabilities",
-    operation_id="list_architecture_capabilities",
-    responses={200: {"description": "What each model architecture supports"}},
-)
-def list_architecture_capabilities(current_user: CurrentUserOrDefault) -> list[ArchitectureCapabilities]:
-    """What each model architecture can generate, and which generation features it supports.
-
-    A static table, the same for every install and every user, derived from what the architectures
-    declare under `invokeai/backend/architectures/defs/`. Fetch it once and join it against model
-    records locally: look up `(base, variant)`, fall back to `(base, null)`.
-
-    Deliberately not a field on the model records themselves — it is the same for every model of an
-    architecture, and putting it there would add these fields to all 115 config schemas.
-
-    Authenticated like every other route here even though the response holds nothing user-specific:
-    the allowlist for public routes is short and deliberate, and this is not a reason to lengthen it.
-
-    Declared `def`, not `async def`: it awaits nothing, so FastAPI runs it in a threadpool instead of
-    on the event loop. See docs/contributing/blocking-work-in-api-routes.
-    """
-    return architecture_capabilities()
 
 
 @model_manager_router.get(
@@ -1338,142 +1294,6 @@ def restart_model_install_file(
 def prune_model_install_jobs(current_admin: AdminUserOrDefault) -> list[int]:
     """Prune all completed and errored jobs from the install job list."""
     return ApiDependencies.invoker.services.model_manager.install.prune_jobs()
-
-
-@model_manager_router.put(
-    "/convert/{key}",
-    operation_id="convert_model",
-    responses={
-        200: {
-            "description": "Model converted successfully",
-            "content": {"application/json": {"example": example_model_config}},
-        },
-        400: {"description": "Bad request"},
-        404: {"description": "Model not found"},
-        409: {"description": "There is already a model registered at this location"},
-    },
-)
-def convert_model(
-    current_admin: AdminUserOrDefault,
-    key: str = Path(description="Unique key of the safetensors main model to convert to diffusers format."),
-) -> AnyModelConfig:
-    """
-    Permanently convert a model into diffusers format, replacing the safetensors version.
-    Note that during the conversion process the key and model hash will change.
-    The return value is the model configuration for the converted model.
-    """
-    if not _MODEL_CONVERSION_LOCK.acquire(blocking=False):
-        raise HTTPException(
-            status_code=409,
-            detail="Another model conversion is already in progress. Wait for it to finish and try again.",
-        )
-    try:
-        # Claimed for the whole conversion, so a delete arriving mid-way is refused rather than
-        # pulling the source out from under it. Deletion never takes the conversion lock, so the
-        # two are ordered consistently and cannot deadlock.
-        with _claim_model_key(key):
-            return _convert_model(key, user_id=current_admin.user_id)
-    finally:
-        _MODEL_CONVERSION_LOCK.release()
-
-
-def _convert_model(key: str, user_id: str) -> AnyModelConfig:
-    """Converts one model. Callers must hold `_MODEL_CONVERSION_LOCK`."""
-    model_manager = ApiDependencies.invoker.services.model_manager
-    loader = model_manager.load
-    logger = ApiDependencies.invoker.services.logger
-    store = ApiDependencies.invoker.services.model_manager.store
-    installer = ApiDependencies.invoker.services.model_manager.install
-
-    try:
-        model_config = store.get_model(key)
-    except UnknownModelException as e:
-        logger.error(str(e))
-        raise HTTPException(status_code=424, detail=str(e))
-
-    if not isinstance(
-        model_config,
-        (
-            Main_Checkpoint_SD1_Config,
-            Main_Checkpoint_SD2_Config,
-            Main_Checkpoint_SDXL_Config,
-            Main_Checkpoint_SDXLRefiner_Config,
-        ),
-    ):
-        msg = f"The model with key {key} is not a main SD 1/2/XL checkpoint model."
-        logger.error(msg)
-        raise HTTPException(400, msg)
-
-    # Under the models root so `install_path` below moves the result rather than copying it across
-    # a filesystem boundary, but inside the scratch directory the orphan scan skips: a half-written
-    # diffusers copy is model files with no database record, which is exactly what that scan hunts
-    # for, and `DELETE /sync/orphaned` would rmtree it while it is still being written.
-    scratch_dir = ApiDependencies.invoker.services.configuration.models_path / CONVERSION_SCRATCH_DIRNAME
-    scratch_dir.mkdir(parents=True, exist_ok=True)
-
-    tmpdir = pathlib.Path(mkdtemp(dir=scratch_dir))
-    preserve_scratch = False
-    try:
-        convert_path = tmpdir / pathlib.Path(model_config.path).stem
-        converted_model = loader.load_model(model_config, user_id=user_id)
-        # write the converted file to the convert path
-        raw_model = converted_model.model
-        assert hasattr(raw_model, "save_pretrained")
-        raw_model.save_pretrained(convert_path)  # type: ignore
-        assert convert_path.exists()
-
-        # temporarily rename the original safetensors file so that there is no naming conflict
-        original_name = model_config.name
-        model_config.name = f"{original_name}.DELETE"
-        changes = ModelRecordChanges(name=model_config.name)
-        store.update_model(key, changes=changes)
-
-        # Install and claim the diffusers before allowing another request to observe its key.
-        with contextlib.ExitStack() as conversion_stack:
-            try:
-                new_key = conversion_stack.enter_context(
-                    _install_and_claim_model(
-                        installer,
-                        convert_path,
-                        config=ModelRecordChanges(
-                            name=original_name,
-                            description=model_config.description,
-                            hash=model_config.hash,
-                            source=model_config.source,
-                        ),
-                    )
-                )
-            except InstallRecoveryRequiredError as e:
-                preserve_scratch = True
-                logger.error(str(e))
-                store.update_model(key, changes=ModelRecordChanges(name=original_name))
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"{e} Conversion recovery source retained at {tmpdir.resolve()}.",
-                ) from e
-            except Exception as e:
-                logger.error(str(e))
-                store.update_model(key, changes=ModelRecordChanges(name=original_name))
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Update the model image if the model had one.
-            try:
-                model_image = ApiDependencies.invoker.services.model_images.get(key)
-                ApiDependencies.invoker.services.model_images.save(model_image, new_key)
-                ApiDependencies.invoker.services.model_images.delete(key)
-            except ModelImageFileNotFoundException:
-                pass
-
-            # Delete the original safetensors file.
-            installer.delete(key)
-
-            # Return the config record for the new diffusers directory.
-            new_config = store.get_model(new_key)
-            new_config = prepare_model_config_for_response(new_config, ApiDependencies)
-            return new_config
-    finally:
-        if not preserve_scratch:
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class StarterModelResponse(BaseModel):

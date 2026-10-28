@@ -33,7 +33,6 @@ import tempfile
 import wave
 from pathlib import Path
 
-import imageio.v2 as iio2
 import numpy as np
 
 from invokeai.app.util.video_audio import AAC_ENCODER_OPTIONS
@@ -43,6 +42,8 @@ KEYFRAME_INTERVAL_SECONDS = 2.0
 
 
 def make_mp4_writer(path: Path | str, fps: float, audio_path: Path | str | None = None, audio_codec: str = "aac"):
+    import imageio.v2 as iio2
+
     """Returns an imageio FFMPEG writer that preserves frame dimensions exactly.
 
     If ``audio_path`` is given, that file's audio is encoded with ``audio_codec``

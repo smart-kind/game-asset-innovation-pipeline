@@ -1,9 +1,6 @@
 # conftest.py is a special pytest file. Fixtures defined in this file will be accessible to all tests in this directory
 # without needing to explicitly import them. (https://docs.pytest.org/en/6.2.x/fixture.html)
 
-
-# We import the model_installer and torch_device fixtures here so that they can be used by all tests. Flake8 does not
-# play well with fixtures (F401 and F811), so this is cleaner than importing in all files that use these fixtures.
 import logging
 import shutil
 import sys
@@ -22,9 +19,6 @@ from invokeai.app.services.config.config_default import InvokeAIAppConfig
 from invokeai.app.services.download import download_default
 from invokeai.app.services.external_generation.external_generation_default import ExternalGenerationService
 from invokeai.app.services.gallery.gallery_default import GalleryService
-from invokeai.app.services.image_index import image_index_default
-from invokeai.app.services.image_index.image_index_default import ImageIndexService
-from invokeai.app.services.image_index.image_index_records_default import ImageIndexRecords
 from invokeai.app.services.image_records.image_records_default import ImageRecordStorage
 from invokeai.app.services.images.images_default import ImageService
 from invokeai.app.services.intermediates.intermediates_default import IntermediatesService
@@ -43,10 +37,7 @@ from invokeai.app.services.users.users_default import UserService
 from invokeai.app.services.video_records.video_records_default import VideoRecordStorage
 from invokeai.app.services.wildcard_records.wildcard_records_default import WildcardRecordsStorage
 from invokeai.app.services.workflow_records.workflow_records_default import WorkflowRecordsStorage
-from invokeai.backend.util.devices import install_cuda_stream_capture_shim
-from invokeai.backend.util.host_platform import is_windows_arm64
 from invokeai.backend.util.logging import InvokeAILogger
-from tests.backend.model_manager.model_manager_fixtures import *  # noqa: F403
 from tests.fixtures.database import (  # noqa: F401
     _external_application_schema,
     _external_test_schema,
@@ -58,13 +49,6 @@ from tests.fixtures.database import (  # noqa: F401
 from tests.fixtures.races import lost_races  # noqa: F401
 from tests.fixtures.sqlite_database import create_mock_sqlite_database  # noqa: F401
 from tests.test_nodes import TestEventService
-
-# The app installs this from apply_monkeypatches(); the suite runs real transformers forwards on the CPU, so on a
-# CUDA torch build without a device (NVIDIA's Windows ARM64 build on a GPU-less runner) it needs the same shim.
-# Only there: every other CUDA build raises rather than crashes, and a process-wide patch would hide what the
-# rest of the suite runs against (Linux CI is a CUDA build without a GPU, too).
-if is_windows_arm64():
-    install_cuda_stream_capture_shim()
 
 # Fixtures that put a test on the backend under test, which `-m uses_database` selects.
 _DATABASE_FIXTURES = {"empty_database", "database"}
@@ -79,17 +63,6 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.uses_database)
         if external and item.get_closest_marker("sqlite_only") is not None:
             item.add_marker(pytest.mark.skip(reason="needs SQLite, but INVOKEAI_TEST_DB_URL names another backend"))
-
-
-@pytest.fixture(autouse=True)
-def _clear_deferred_empty_cache():
-    """`TorchDevice._empty_cache_deferred` is process-global: a test that exercises a peer-aware
-    skip must not make a later test perform a real (GPU-initializing) empty_cache."""
-    from invokeai.backend.util.devices import TorchDevice
-
-    TorchDevice._empty_cache_deferred.clear()
-    yield
-    TorchDevice._empty_cache_deferred.clear()
 
 
 _PRODUCTION_BCRYPT_ROUNDS = password_utils.BCRYPT_ROUNDS
@@ -115,7 +88,6 @@ def _fast_service_polling(monkeypatch: pytest.MonkeyPatch) -> None:
     that long. Shortening the intervals keeps the same loops and orderings; it only removes the idle wait."""
     monkeypatch.setattr(download_default, "_QUEUE_POLL_SECONDS", 0.02)
     monkeypatch.setattr(model_install_default, "_INSTALL_QUEUE_POLL_SECONDS", 0.02)
-    monkeypatch.setattr(image_index_default, "_POLL_SECONDS", 0.02)
 
 
 @pytest.fixture
@@ -130,7 +102,7 @@ def mock_services(mock_sqlite_database: Database) -> InvocationServices:
     # Image indexing is on by default, but `model_manager` below is None: starting
     # the indexer against these stub services would fail while resolving the
     # embedding model. Tests that exercise the index enable it themselves.
-    configuration = InvokeAIAppConfig(use_memory_db=True, node_cache_size=0, image_index_enabled=False)
+    configuration = InvokeAIAppConfig(use_memory_db=True, node_cache_size=0)
     logger = InvokeAILogger.get_logger()
     db = mock_sqlite_database
 
@@ -178,8 +150,6 @@ def mock_services(mock_sqlite_database: Database) -> InvocationServices:
         # Real SQLite-backed gallery service: the virtual-boards router reads dates and
         # per-date item names through it, and MagicMock cannot exercise the filter SQL.
         gallery=GalleryService(db),
-        image_index_records=ImageIndexRecords(db),
-        image_index=ImageIndexService(),
         intermediates=IntermediatesService(records=IntermediatesRecords(db), logger=logger),
     )
 

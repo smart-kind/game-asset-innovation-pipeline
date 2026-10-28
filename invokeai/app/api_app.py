@@ -35,7 +35,6 @@ from invokeai.app.api.routers import (
     fonts,
     gallery,
     gallery_maintenance,
-    image_map,
     image_moves,
     images,
     intermediates,
@@ -788,7 +787,6 @@ app.include_router(fonts.fonts_router, prefix="/api")
 app.include_router(model_manager.model_manager_router, prefix="/api")
 app.include_router(image_moves.image_moves_router, prefix="/api")
 app.include_router(images.images_router, prefix="/api")
-app.include_router(image_map.image_map_router, prefix="/api")
 app.include_router(intermediates.intermediates_router, prefix="/api")
 app.include_router(videos.videos_router, prefix="/api")
 app.include_router(gallery.gallery_router, prefix="/api")

@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 
-import torch
 from typing_extensions import Self
 
 from invokeai.app.services.config.config_default import InvokeAIAppConfig
@@ -29,7 +28,6 @@ class ModelManagerServiceBase(ABC):
         model_record_service: ModelRecordServiceBase,
         download_queue: DownloadQueueServiceBase,
         events: EventServiceBase,
-        execution_device: torch.device,
     ) -> Self:
         """
         Construct the model manager service instance.

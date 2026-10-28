@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 from dynamicprompts.wildcards import WildcardManager
 from PIL.Image import Image
 from pydantic.networks import AnyHttpUrl
-from torch import Tensor
 
 from invokeai.app.invocations.constants import IMAGE_MODES
 from invokeai.app.invocations.fields import MetadataField, WithBoard, WithMetadata
@@ -33,17 +32,18 @@ from invokeai.app.services.wildcard_records.wildcard_records_common import build
 from invokeai.app.util.step_callback import diffusion_step_callback
 from invokeai.backend.model_manager.configs.base import Config_Base
 from invokeai.backend.model_manager.configs.factory import AnyModelConfig
-from invokeai.backend.model_manager.load.load_base import LoadedModel, LoadedModelWithoutConfig
-from invokeai.backend.model_manager.taxonomy import AnyModel, BaseModelType, ModelFormat, ModelType, SubModelType
-from invokeai.backend.stable_diffusion.diffusers_pipeline import PipelineIntermediateState
-from invokeai.backend.stable_diffusion.diffusion.conditioning_data import ConditioningFieldData
-from invokeai.backend.util.devices import TorchDevice
+from invokeai.backend.model_manager.taxonomy import BaseModelType, ModelFormat, ModelType, SubModelType
 
 if TYPE_CHECKING:
+    from torch import Tensor
+
     from invokeai.app.invocations.baseinvocation import BaseInvocation
     from invokeai.app.invocations.model import ModelIdentifierField
     from invokeai.app.services.session_queue.session_queue_common import SessionQueueItem
     from invokeai.app.services.shared.execution_engine.child import ChildExecutionCapability
+    from invokeai.backend.model_manager.load.load_base import LoadedModel, LoadedModelWithoutConfig
+    from invokeai.backend.stable_diffusion.diffusers_pipeline import PipelineIntermediateState
+    from invokeai.app.services.object_serializer.conditioning_null import ConditioningFieldData
 
 """
 The InvocationContext provides access to various services and data about the current invocation.
@@ -511,7 +511,7 @@ class VideosInterface(InvocationContextInterface):
 
 
 class TensorsInterface(InvocationContextInterface):
-    def save(self, tensor: Tensor) -> str:
+    def save(self, tensor: "Tensor") -> str:
         """Saves a tensor, returning its name.
 
         Args:
@@ -524,7 +524,7 @@ class TensorsInterface(InvocationContextInterface):
         name = self._services.tensors.save(obj=tensor)
         return name
 
-    def load(self, name: str) -> Tensor:
+    def load(self, name: str) -> "Tensor":
         """Loads a tensor by name. This method returns a copy of the tensor.
 
         Args:
@@ -537,7 +537,7 @@ class TensorsInterface(InvocationContextInterface):
 
 
 class ConditioningInterface(InvocationContextInterface):
-    def save(self, conditioning_data: ConditioningFieldData) -> str:
+    def save(self, conditioning_data: "ConditioningFieldData") -> str:
         """Saves a conditioning data object, returning its name.
 
         Args:
@@ -550,7 +550,7 @@ class ConditioningInterface(InvocationContextInterface):
         name = self._services.conditioning.save(obj=conditioning_data)
         return name
 
-    def load(self, name: str) -> ConditioningFieldData:
+    def load(self, name: str) -> "ConditioningFieldData":
         """Loads conditioning data by name. This method returns a copy of the conditioning data.
 
         Args:
@@ -586,7 +586,7 @@ class ModelsInterface(InvocationContextInterface):
 
     def load(
         self, identifier: Union[str, "ModelIdentifierField"], submodel_type: Optional[SubModelType] = None
-    ) -> LoadedModel:
+    ) -> "LoadedModel":
         """Load a model.
 
         Args:
@@ -616,7 +616,7 @@ class ModelsInterface(InvocationContextInterface):
 
     def load_by_attrs(
         self, name: str, base: BaseModelType, type: ModelType, submodel_type: Optional[SubModelType] = None
-    ) -> LoadedModel:
+    ) -> "LoadedModel":
         """Load a model by its attributes.
 
         Args:
@@ -761,8 +761,8 @@ class ModelsInterface(InvocationContextInterface):
     def load_local_model(
         self,
         model_path: Path,
-        loader: Optional[Callable[[Path], AnyModel]] = None,
-    ) -> LoadedModelWithoutConfig:
+        loader: Optional[Callable[[Path], Any]] = None,
+    ) -> "LoadedModelWithoutConfig":
         """
         Load the model file located at the indicated path
 
@@ -785,8 +785,8 @@ class ModelsInterface(InvocationContextInterface):
     def load_remote_model(
         self,
         source: str | AnyHttpUrl,
-        loader: Optional[Callable[[Path], AnyModel]] = None,
-    ) -> LoadedModelWithoutConfig:
+        loader: Optional[Callable[[Path], Any]] = None,
+    ) -> "LoadedModelWithoutConfig":
         """
         Download, cache, and load the model file located at the indicated URL or repo_id.
 
@@ -860,7 +860,7 @@ class UtilInterface(InvocationContextInterface):
         """
         return self._is_canceled()
 
-    def sd_step_callback(self, intermediate_state: PipelineIntermediateState, base_model: BaseModelType) -> None:
+    def sd_step_callback(self, intermediate_state: "PipelineIntermediateState", base_model: BaseModelType) -> None:
         """
         The step callback emits a progress event with the current step, the total number of
         steps, a preview image, and some other internal metadata.
@@ -879,7 +879,7 @@ class UtilInterface(InvocationContextInterface):
             is_canceled=self.is_canceled,
         )
 
-    def flux_step_callback(self, intermediate_state: PipelineIntermediateState) -> None:
+    def flux_step_callback(self, intermediate_state: "PipelineIntermediateState") -> None:
         """
         The step callback emits a progress event with the current step, the total number of
         steps, a preview image, and some other internal metadata.
@@ -897,7 +897,7 @@ class UtilInterface(InvocationContextInterface):
             is_canceled=self.is_canceled,
         )
 
-    def flux2_step_callback(self, intermediate_state: PipelineIntermediateState) -> None:
+    def flux2_step_callback(self, intermediate_state: "PipelineIntermediateState") -> None:
         """
         The step callback for FLUX.2 Klein models (32-channel VAE).
 
@@ -966,12 +966,8 @@ class UtilInterface(InvocationContextInterface):
                 original size.
         """
 
-        # Every denoise loop reports here once per step, so this is where a busy worker reaches a
-        # natural boundary in its own GPU work. If a peer deferred a process-global empty_cache
-        # (skipped so as not to stall THIS worker mid-step), run it now, from this thread, where
-        # the driver-level free costs this device at most a re-allocation of its cached working
-        # blocks. A flag test when nothing is pending.
-        TorchDevice.flush_deferred_empty_cache()
+        # Every denoise loop reports here once per step; the peer-aware empty_cache flush hook that
+        # used to run here belonged to the torch stack and is gone in the API-only build.
 
         queue_item = self._data.queue_item
 

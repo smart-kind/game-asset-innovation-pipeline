@@ -220,3 +220,4 @@ docker/*.tar.gz
 
 # 运行时数据（SQLite 库/生成图/模型记录，体积大且机器相关）
 docker/invokeai-data/
+invokeai-data/
